@@ -1,0 +1,34 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Tool caches
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Review Map runtime caches and data
+.cache/
+data/
+*.parquet
+
+# Generated reports from local runs (committed reports live in reports/)
+/report.html
+/report.md
+/report.json
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
