@@ -90,3 +90,63 @@
   branched off base.
 - Validating input (config, refs) up front, with messages that name the problem, is what
   separates a tool people can use from a script only its author can run.
+
+## Phase 2 — Map changed lines to functions
+
+**Built**
+- `code/functions.py`:
+  - `find_units()` uses tree-sitter to list functions, methods and classes with qualified
+    names (`Outer.Inner.deep`, `fetch.helper`) and 1-based line ranges. Ranges include
+    decorators and `export`.
+  - Python: functions, async functions, methods, nested classes and functions.
+  - JS/TS/TSX: function declarations, generators, classes, abstract classes, class methods,
+    arrow/function values assigned to `const` or class fields, default exports, TS
+    interfaces, type aliases, enums and namespaces.
+  - `map_file()`: added lines are looked up in the new file, removed lines in the old file
+    (merge base). That lets deleted functions be reported by name and shows renamed
+    functions as old (removed) plus new (added). Lines outside any definition, and files in
+    unsupported languages (YAML, Markdown...), go to a `<module>` unit.
+  - Blank and punctuation-only lines (`}`, `);`) are not attributed to units. git's diff
+    often pairs a removed `}` with the wrong function.
+  - `collect_units()`: maps all reviewable files, reading old/new sources through callbacks
+    so it can be tested without git.
+- `models.py`: `UnitKind`, `CodeUnit`, `ChangedUnit` (path, name, kind, new and old line
+  ranges, added/removed line numbers).
+- `git_source.py`: `merge_base()`, `read_file()` (`git cat-file blob sha:path`).
+- CLI: `review-map units`. `diff` and `units` share `_load_local()`. Plurals fixed.
+- **Design change (approved):** official grammar packages (`tree-sitter-python`,
+  `-javascript`, `-typescript`) instead of `tree-sitter-language-pack`. Its 1.x line
+  downloads grammars at runtime. PLAN.md tech stack updated.
+
+**Files**
+`src/review_map/code/functions.py`, `src/review_map/models.py`, `src/review_map/diff/git_source.py`,
+`src/review_map/cli.py`, `tests/test_functions.py`,
+`pyproject.toml` / `uv.lock`, `PLAN.md`.
+
+**Tested**
+- Python: decorators (unit starts at the first decorator), async, nested classes and
+  functions, class attributes go to the class, module-level lambda, syntax errors still parse.
+- JS/TS/TSX: all the definition types above; a TS class decorator and a method decorator.
+- Mapping: modify/add/delete functions, removed-only change, decorator edit, YAML file as
+  `<module>`, blank lines, punctuation-only lines, added and deleted files read only the
+  right version.
+- End to end on a temporary git repo (including a renamed file) and the `units` CLI.
+- `pytest -q` → 119 passed. `ruff check .` → all passed. `ruff format --check .` → clean.
+- Demo: `review-map units --base HEAD~2 --head HEAD~1` on this repo (116 units in
+  18 files). A TS scratch repo shows a deleted method by name.
+
+**Known limitations**
+- Methods defined inside object literals (`{ handler() {} }`) count towards the enclosing
+  unit, not as their own units.
+- Two definitions with the same qualified name in one file (TS overloads, redefinitions)
+  are merged into one unit.
+- Files > 1 MB, or in languages other than Python/JS/TS, are one `<module>` unit.
+- Only committed refs: sources are read from git objects, not the working tree.
+
+**What I should understand from this phase**
+- An AST turns text into a tree of nested definitions with exact start/end lines. "Which
+  function is line 42 in?" becomes "which is the innermost node whose range contains 42?".
+- Every diff has two sides: added lines only exist in the new file, removed lines only in
+  the old one. Each must be looked up in its own version.
+- A diff is just one way to line up two versions; tools built on top of it should not
+  over-trust details like which `}` was "removed".

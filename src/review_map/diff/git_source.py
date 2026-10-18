@@ -96,3 +96,20 @@ def get_diff(repo: Path, base: str, head: str) -> str:
             )
         raise GitError(f"git diff failed: {message}")
     return result.stdout
+
+
+def merge_base(repo: Path, base: str, head: str) -> str:
+    """The commit where `head` branched off `base` (the "old" side of a PR diff)."""
+    result = _git(repo, "merge-base", resolve_ref(repo, base), resolve_ref(repo, head))
+    if result.returncode != 0:
+        raise GitError(
+            f"{base!r} and {head!r} have no common history.",
+            hint="Make sure both refs come from the same repository.",
+        )
+    return result.stdout.strip()
+
+
+def read_file(repo: Path, commit: str, path: str) -> str | None:
+    """Contents of `path` at `commit`, or None if it does not exist there."""
+    result = _git(repo, "cat-file", "blob", f"{commit}:{path}")
+    return result.stdout if result.returncode == 0 else None

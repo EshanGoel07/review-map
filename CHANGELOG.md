@@ -13,3 +13,5 @@ uses [Semantic Versioning](https://semver.org/).
   generated/vendored and ignored files.
 - Optional `.reviewmap.yml` config with validation and clear error messages
   (see `examples/reviewmap.yml`).
+- `review-map units`: map changed lines to functions, classes and methods with tree-sitter
+  (Python, JavaScript, TypeScript, TSX); deleted functions are reported by name.

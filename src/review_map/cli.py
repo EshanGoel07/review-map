@@ -2,6 +2,7 @@
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
 
@@ -11,11 +12,12 @@ from rich.markup import escape
 from rich.table import Table
 
 from review_map import __version__
-from review_map.config import load_config
+from review_map.code.functions import collect_units
+from review_map.config import LoadedConfig, load_config
 from review_map.diff import git_source
 from review_map.diff.parser import parse_diff
 from review_map.errors import ReviewMapError
-from review_map.models import ChangedFile, FileStatus
+from review_map.models import ChangedFile, ChangedUnit, FileStatus
 
 app = typer.Typer(
     name="review-map",
@@ -57,6 +59,10 @@ def friendly_errors() -> Iterator[None]:
         raise typer.Exit(exc.exit_code) from None
 
 
+def _plural(n: int, word: str) -> str:
+    return f"{n} {word}" if n == 1 else f"{n} {word}s"
+
+
 @app.callback()
 def main() -> None:
     """Review Map: get a short reading plan for a pull request."""
@@ -66,6 +72,42 @@ def main() -> None:
 def version() -> None:
     """Show the installed Review Map version."""
     console.print(f"review-map {__version__}")
+
+
+@dataclass
+class LocalChange:
+    root: Path
+    base: str
+    head: str
+    merge_base: str
+    head_sha: str
+    loaded: LoadedConfig
+    files: list[ChangedFile]
+
+
+def _load_local(repo: Path, base: str | None, head: str, config: Path | None) -> LocalChange:
+    root = git_source.find_repo_root(repo)
+    loaded = load_config(root, config)
+    base = base or git_source.default_base(root)
+    files = parse_diff(git_source.get_diff(root, base, head), loaded.config)
+    return LocalChange(
+        root=root,
+        base=base,
+        head=head,
+        merge_base=git_source.merge_base(root, base, head),
+        head_sha=git_source.resolve_ref(root, head),
+        loaded=loaded,
+        files=files,
+    )
+
+
+def _print_header(title: str, change: LocalChange) -> None:
+    loaded = change.loaded
+    source = str(loaded.source.relative_to(change.root)) if loaded.source else "defaults"
+    console.print(
+        f"[bold]{title}[/] {escape(change.base)}...{escape(change.head)} in "
+        f"{escape(str(change.root))}  [dim](config: {escape(source)})[/]"
+    )
 
 
 _STATUS_STYLE = {
@@ -97,16 +139,9 @@ def diff(
 ) -> None:
     """List the files changed between BASE and HEAD (what a PR from HEAD into BASE shows)."""
     with friendly_errors():
-        root = git_source.find_repo_root(repo)
-        loaded = load_config(root, config)
-        base = base or git_source.default_base(root)
-        files = parse_diff(git_source.get_diff(root, base, head), loaded.config)
-
-    source = str(loaded.source.relative_to(root)) if loaded.source else "defaults"
-    console.print(
-        f"[bold]Diff[/] {escape(base)}...{escape(head)} in {escape(str(root))}  "
-        f"[dim](config: {escape(source)})[/]"
-    )
+        change = _load_local(repo, base, head, config)
+    _print_header("Diff", change)
+    files = change.files
     if not files:
         console.print("No changes.")
         return
@@ -134,9 +169,66 @@ def diff(
 
     reviewable = sum(f.is_reviewable for f in files)
     console.print(
-        f"{len(files)} files changed, [green]+{sum(f.added for f in files)}[/] "
+        f"{_plural(len(files), 'file')} changed, [green]+{sum(f.added for f in files)}[/] "
         f"[red]-{sum(f.removed for f in files)}[/] · {reviewable} to review, "
         f"{len(files) - reviewable} skipped (binary, generated or ignored)"
+    )
+
+
+def _line_range(u: ChangedUnit) -> str:
+    if u.start_line is not None:
+        return f"{u.start_line}-{u.end_line}"
+    return f"old {u.old_start_line}-{u.old_end_line} (deleted)"
+
+
+@app.command()
+def units(
+    repo: RepoOption = Path("."),
+    base: BaseOption = None,
+    head: HeadOption = "HEAD",
+    config: ConfigOption = None,
+) -> None:
+    """List the functions, classes and methods touched between BASE and HEAD."""
+    with friendly_errors():
+        change = _load_local(repo, base, head, config)
+        changed = collect_units(
+            change.files,
+            read_old=lambda p: git_source.read_file(change.root, change.merge_base, p),
+            read_new=lambda p: git_source.read_file(change.root, change.head_sha, p),
+        )
+    _print_header("Units", change)
+    if not changed:
+        console.print("No code changes to map.")
+        return
+
+    table = Table(show_edge=False, header_style="bold")
+    table.add_column("File", overflow="fold")
+    table.add_column("Unit", overflow="fold")
+    table.add_column("Kind")
+    table.add_column("Lines", justify="right")
+    table.add_column("+", justify="right", style="green")
+    table.add_column("-", justify="right", style="red")
+    previous = None
+    for u in changed:
+        table.add_row(
+            escape(u.path) if u.path != previous else "",
+            escape(u.name),
+            u.kind.value,
+            _line_range(u),
+            str(u.added),
+            str(u.removed),
+        )
+        previous = u.path
+    console.print(table)
+    n_files = len({u.path for u in changed})
+    skipped = sum(not f.is_reviewable for f in change.files)
+    console.print(
+        f"{_plural(len(changed), 'unit')} changed in {_plural(n_files, 'file')}"
+        + (
+            f" · {_plural(skipped, 'file')} skipped (binary, generated or ignored)"
+            if skipped
+            else ""
+        )
     )
 
 

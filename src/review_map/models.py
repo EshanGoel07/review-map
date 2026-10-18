@@ -79,3 +79,61 @@ class ChangedFile(BaseModel):
     def is_reviewable(self) -> bool:
         """True if later phases should analyse this file's code."""
         return not (self.is_binary or self.is_generated or self.ignored_by)
+
+
+class UnitKind(StrEnum):
+    FUNCTION = "function"
+    METHOD = "method"
+    CLASS = "class"
+    TYPE = "type"  # TS interface / type alias / enum
+    NAMESPACE = "namespace"
+    MODULE = "module"  # top-level code, or a file we cannot parse
+
+
+MODULE_UNIT = "<module>"
+
+
+class CodeUnit(BaseModel):
+    """A function/class/method found in one version of a source file (1-based lines)."""
+
+    name: str  # qualified, e.g. "UserService.login" or "outer.inner"
+    kind: UnitKind
+    start_line: int
+    end_line: int
+
+
+class ChangedUnit(BaseModel):
+    """A code unit touched by the diff, with the changed line numbers inside it.
+
+    `start_line`/`end_line` are in the new file (None if the unit was deleted);
+    `old_start_line`/`old_end_line` are in the old file (None if the unit is new).
+    For `<module>` units the range spans the changed lines only.
+    """
+
+    path: str
+    old_path: str | None = None
+    language: str | None = None
+    name: str
+    kind: UnitKind
+    start_line: int | None = None
+    end_line: int | None = None
+    old_start_line: int | None = None
+    old_end_line: int | None = None
+    added_lines: list[int] = Field(default_factory=list)
+    removed_lines: list[int] = Field(default_factory=list)
+
+    @property
+    def added(self) -> int:
+        return len(self.added_lines)
+
+    @property
+    def removed(self) -> int:
+        return len(self.removed_lines)
+
+    @property
+    def lines_changed(self) -> int:
+        return self.added + self.removed
+
+    @property
+    def unit_id(self) -> str:
+        return f"{self.path}::{self.name}"
