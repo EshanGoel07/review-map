@@ -9,3 +9,7 @@ uses [Semantic Versioning](https://semver.org/).
 ### Added
 - Project skeleton, packaging (`pyproject.toml`) and the `review-map` console script.
 - `review-map version` command.
+- `review-map diff`: list files changed between two git refs (`base...head`), flagging binary,
+  generated/vendored and ignored files.
+- Optional `.reviewmap.yml` config with validation and clear error messages
+  (see `examples/reviewmap.yml`).

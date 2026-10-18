@@ -1,0 +1,25 @@
+# Example Review Map config. Copy to `.reviewmap.yml` in the root of your repo.
+# Every setting is optional; the values below are the defaults unless noted.
+
+# Files to leave out of the reading plan (still listed as "ignored").
+# Globs work like .gitignore: "*.snap" matches at any depth, "docs/" matches a
+# whole directory, "src/legacy/*.py" is anchored at the repo root, "**" spans dirs.
+ignore: []
+#  - "docs/"
+#  - "**/__snapshots__/"
+
+# Extra paths that should always count as risky (added to the built-in rules).
+sensitive_paths: []
+#  - "src/billing/"
+#  - "app/permissions.py"
+
+# How much the plan asks you to read carefully.
+reading_budget:
+  lines_fraction: 0.15  # share of changed lines, between 0 and 1
+  max_units: 5          # at most this many functions/sections
+
+# LLM used to read the PR description. Environment variables override this.
+# Without an API key, Review Map falls back to a heuristic mode.
+llm:
+  provider: null  # groq | gemini | anthropic | openai | ollama
+  model: null     # e.g. llama-3.3-70b-versatile

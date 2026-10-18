@@ -1,0 +1,71 @@
+diff --git a/added.py b/added.py
+new file mode 100644
+index 0000000..a797310
+--- /dev/null
++++ b/added.py
+@@ -0,0 +1 @@
++print("new")
+diff --git a/pure_old.txt b/dir/pure_new.txt
+similarity index 100%
+rename from pure_old.txt
+rename to dir/pure_new.txt
+diff --git a/gone.py b/gone.py
+deleted file mode 100644
+index 7d4290a..0000000
+--- a/gone.py
++++ /dev/null
+@@ -1 +0,0 @@
+-x = 1
+diff --git a/img.bin b/img.bin
+index 8352675..cfaefd9 100644
+Binary files a/img.bin and b/img.bin differ
+diff --git a/mod.py b/mod.py
+index 025ec86..b0bc18e 100644
+--- a/mod.py
++++ b/mod.py
+@@ -1,6 +1,10 @@
+ def a():
+-    return 1
++    return 10
+ 
+ 
+ def b():
+     return 2
++
++
++def c():
++    return 3
+\ No newline at end of file
+diff --git a/old_name.txt b/new_name.txt
+similarity index 84%
+rename from old_name.txt
+rename to new_name.txt
+index f62562a..91dff3d 100644
+--- a/old_name.txt
++++ b/new_name.txt
+@@ -1,7 +1,7 @@
+ line1
+ line2
+ line3
+-line4
++CHANGED
+ line5
+ line6
+ line7
+diff --git a/package-lock.json b/package-lock.json
+new file mode 100644
+index 0000000..58b6707
+--- /dev/null
++++ b/package-lock.json
+@@ -0,0 +1 @@
++{"lockfileVersion": 3}
+diff --git a/run.sh b/run.sh
+old mode 100644
+new mode 100755
+diff --git a/sp ace/f.py b/sp ace/f.py
+new file mode 100644
+index 0000000..45b983b
+--- /dev/null
++++ b/sp ace/f.py	
+@@ -0,0 +1 @@
++hi
