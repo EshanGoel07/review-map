@@ -17,7 +17,8 @@ from review_map.config import LoadedConfig, load_config
 from review_map.diff import git_source
 from review_map.diff.parser import parse_diff
 from review_map.errors import ReviewMapError
-from review_map.models import ChangedFile, ChangedUnit, FileStatus
+from review_map.models import ChangedFile, ChangedUnit, FileStatus, RiskLevel
+from review_map.risk.rules import score_units
 
 app = typer.Typer(
     name="review-map",
@@ -98,6 +99,14 @@ def _load_local(repo: Path, base: str | None, head: str, config: Path | None) ->
         head_sha=git_source.resolve_ref(root, head),
         loaded=loaded,
         files=files,
+    )
+
+
+def _collect(change: LocalChange) -> list[ChangedUnit]:
+    return collect_units(
+        change.files,
+        read_old=lambda p: git_source.read_file(change.root, change.merge_base, p),
+        read_new=lambda p: git_source.read_file(change.root, change.head_sha, p),
     )
 
 
@@ -191,11 +200,7 @@ def units(
     """List the functions, classes and methods touched between BASE and HEAD."""
     with friendly_errors():
         change = _load_local(repo, base, head, config)
-        changed = collect_units(
-            change.files,
-            read_old=lambda p: git_source.read_file(change.root, change.merge_base, p),
-            read_new=lambda p: git_source.read_file(change.root, change.head_sha, p),
-        )
+        changed = _collect(change)
     _print_header("Units", change)
     if not changed:
         console.print("No code changes to map.")
@@ -229,6 +234,51 @@ def units(
             if skipped
             else ""
         )
+    )
+
+
+_LEVEL_STYLE = {RiskLevel.HIGH: "bold red", RiskLevel.MEDIUM: "yellow", RiskLevel.LOW: "dim"}
+
+
+@app.command()
+def score(
+    repo: RepoOption = Path("."),
+    base: BaseOption = None,
+    head: HeadOption = "HEAD",
+    config: ConfigOption = None,
+    limit: Annotated[int, typer.Option(help="Show at most N units (0 = all).")] = 20,
+) -> None:
+    """Rank changed units by rule-based risk score (0-100), with reasons."""
+    with friendly_errors():
+        change = _load_local(repo, base, head, config)
+        scored = score_units(_collect(change), change.files, change.loaded.config)
+    _print_header("Risk", change)
+    if not scored:
+        console.print("No code changes to score.")
+        return
+
+    shown = scored if limit <= 0 else scored[:limit]
+    table = Table(show_edge=False, header_style="bold", show_lines=False)
+    table.add_column("#", justify="right", style="dim")
+    table.add_column("Score", justify="right")
+    table.add_column("Unit", overflow="fold", ratio=2)
+    table.add_column("Reasons", overflow="fold", ratio=3)
+    for i, s in enumerate(shown, 1):
+        style = _LEVEL_STYLE[s.risk.level]
+        reasons = "; ".join(r.message for r in s.risk.reasons if r.points > 0) or "-"
+        table.add_row(
+            str(i),
+            f"[{style}]{s.risk.score} {s.risk.level.value}[/]",
+            f"{escape(s.unit.path)}:{_line_range(s.unit)}\n[bold]{escape(s.unit.name)}[/]",
+            escape(reasons),
+        )
+    console.print(table)
+
+    counts = {level: sum(s.risk.level is level for s in scored) for level in RiskLevel}
+    more = f" · {len(scored) - len(shown)} more (use --limit 0)" if len(shown) < len(scored) else ""
+    console.print(
+        f"{_plural(len(scored), 'unit')}: [bold red]{counts[RiskLevel.HIGH]} high[/], "
+        f"[yellow]{counts[RiskLevel.MEDIUM]} medium[/], {counts[RiskLevel.LOW]} low{more}"
     )
 
 

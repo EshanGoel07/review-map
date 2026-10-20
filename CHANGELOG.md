@@ -15,3 +15,8 @@ uses [Semantic Versioning](https://semver.org/).
   (see `examples/reviewmap.yml`).
 - `review-map units`: map changed lines to functions, classes and methods with tree-sitter
   (Python, JavaScript, TypeScript, TSX); deleted functions are reported by name.
+- `review-map score`: rule-based risk score (0-100, low/medium/high) for each changed unit
+  with human-readable reasons; weights in one dict.
+
+### Fixed
+- Pin `tree-sitter<0.26`: 0.26.0 segfaults when parsing larger files repeatedly.

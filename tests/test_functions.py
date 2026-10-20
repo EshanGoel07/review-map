@@ -392,3 +392,27 @@ def test_cli_units(py_repo):
     assert "remove_me" in result.output
     assert "(deleted)" in result.output
     assert "1 file skipped" in result.output
+
+
+def test_repeated_parsing_does_not_crash():
+    """Regression: tree-sitter 0.26.0 segfaults on the third parse of this file.
+
+    Run in a subprocess so a crash fails this test instead of killing pytest.
+    """
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    fixture = Path(__file__).parent / "fixtures" / "code" / "large_module.py"
+    script = (
+        "import sys\n"
+        "from review_map.code.functions import find_units\n"
+        "src = open(sys.argv[1]).read()\n"
+        "counts = {len(find_units(src, 'python')) for _ in range(20)}\n"
+        "print(counts.pop() if len(counts) == 1 else 'unstable')\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(fixture)], capture_output=True, text=True, timeout=60
+    )
+    assert result.returncode == 0, f"parser crashed (exit {result.returncode}): {result.stderr}"
+    assert result.stdout.strip() == "13"

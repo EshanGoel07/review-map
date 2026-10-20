@@ -183,6 +183,8 @@ class _Acc:
     old: CodeUnit | None = None
     added: list[int] = field(default_factory=list)
     removed: list[int] = field(default_factory=list)
+    added_text: list[str] = field(default_factory=list)
+    removed_text: list[str] = field(default_factory=list)
 
 
 def map_file(
@@ -210,11 +212,13 @@ def map_file(
                 b = bucket(unit)
                 b.new = b.new or unit
                 b.added.append(line.new_lineno)
+                b.added_text.append(line.text)
             elif line.kind is LineKind.REMOVED and line.old_lineno:
                 unit = unit_at(old_units, line.old_lineno)
                 b = bucket(unit)
                 b.old = b.old or unit
                 b.removed.append(line.old_lineno)
+                b.removed_text.append(line.text)
 
     # A unit only touched by removals may still exist in the new file (and vice versa).
     new_by_name = {u.name: u for u in reversed(new_units)}
@@ -243,6 +247,8 @@ def map_file(
                 old_end_line=old_range[1],
                 added_lines=a.added,
                 removed_lines=a.removed,
+                added_text=a.added_text,
+                removed_text=a.removed_text,
             )
         )
     result.sort(key=lambda u: (u.start_line or u.old_start_line or 0, u.name))

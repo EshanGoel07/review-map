@@ -150,3 +150,62 @@
   the old one. Each must be looked up in its own version.
 - A diff is just one way to line up two versions; tools built on top of it should not
   over-trust details like which `}` was "removed".
+
+## Phase 3 — Rule-based risk scorer (baseline)
+
+**Built**
+- `risk/rules.py`: scores every `ChangedUnit` from 0 to 100, with short human-readable reasons.
+  - All points live in one `WEIGHTS` dict. Levels: high ≥ 60, medium ≥ 30, else low.
+  - Keyword rules (auth, permissions, crypto, payments) match whole words from the path, the
+    unit name and the changed lines. Identifiers are split first (`isAdmin` → `is admin`),
+    with simple plural/version handling (`roles`, `policies`, `OAuth2`). Changed lines in
+    Markdown/plain text don't count, only their path.
+  - Pattern rules look at added lines only: raw SQL (uppercase keywords or `.execute(`),
+    shell/eval/unsafe deserialization/`innerHTML`, file deletion, network calls (incl.
+    `verify=False`), and hardcoded secrets (assignments, private keys, AWS/GitHub/`sk-` tokens).
+  - Path rules: `sensitive_paths` from `.reviewmap.yml` (old path counts for renames), DB
+    migrations, CI workflows, config/dependency files (plus `os.environ`/`process.env` reads).
+  - Check rules, ignoring lines that only moved:
+    - `removed_check`: an if/raise/assert/throw removed with no replacement.
+    - `condition_loosened`: a condition/return gained `or`/`||`.
+    - `condition_changed`: other edits to conditions or return lines.
+  - `security_check_changed` bonus when an auth/permissions unit also has a check change.
+  - Size tiers (≥ 10/30/80 lines), `no_tests` (source code changed and no test file in the
+    diff), `test_code` (−20, so tests rank lower but are still listed).
+- `models.py`: `RiskLevel`, `RiskReason`, `RiskScore`, `ScoredUnit`. `ChangedUnit` now also
+  carries `added_text`/`removed_text`.
+- CLI: `review-map score [--limit N]` prints a ranked table with level colors and reasons.
+- `pyproject.toml`: ruff ignores SIM905 (`"a b c".split()` word lists).
+- **Bug found while demoing:** `tree-sitter` 0.26.0 (the newest release) segfaults when it
+  parses larger files repeatedly in one process. Pinned `tree-sitter>=0.25.2,<0.26`. Added a
+  regression test (runs in a subprocess; verified it fails on 0.26.0 and passes on 0.25.2).
+
+**Files**
+`src/review_map/risk/rules.py`, `src/review_map/models.py`, `src/review_map/code/functions.py`,
+`src/review_map/cli.py`, `tests/test_rules.py`, `tests/test_functions.py`,
+`tests/fixtures/code/large_module.py`, `pyproject.toml`, `uv.lock`.
+
+**Tested**
+- Every rule in `WEIGHTS` has a positive case where it fires and a negative case where it
+  must not (a test enforces that no rule is left untested). The tricky negatives: `author` ≠
+  auth, `evaluate(` ≠ eval, English "select … from" ≠ SQL, `os.environ` key ≠ hardcoded
+  secret, "pairs" ≠ pay, `.md` prose.
+- Moved vs. removed vs. rewritten checks, pattern rules ignore removed lines, size tiers are
+  exclusive, clamping to 0/100, level thresholds, test-path detection, ranking, CLI.
+- `pytest -q` → 179 passed. `ruff check .` → all passed. `ruff format --check .` → clean.
+- Demo: TS repo → `AuthService.isAdmin` (now accepts "staff") scores 90/high. The Phase 2
+  commit of this repo is all low. Running on real code is what exposed the false "payments:
+  pay" matches (a plural rule applied to every word) and the tree-sitter crash; both fixed.
+
+**Known limitations**
+- Keywords inside comments/docstrings count like code (e.g. "login" in a docstring example).
+- Keyword rules are coarse: every unit in `auth.py` gets the auth points.
+- Weights are hand-picked; Phase 10 measures whether a trained model does better.
+- `condition_changed` fires on any changed `return` line, which is common.
+
+**What I should understand from this phase**
+- A rule-based baseline is cheap, explainable and works on any repo. It's also the bar the
+  ML model must beat, otherwise the model isn't worth its complexity.
+- Every rule needs a negative test: false positives are what make reviewers ignore a tool.
+- Running the tool on real code finds bugs that unit tests miss (the plural bug, the
+  native crash); after fixing one, add a regression test.

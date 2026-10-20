@@ -121,6 +121,8 @@ class ChangedUnit(BaseModel):
     old_end_line: int | None = None
     added_lines: list[int] = Field(default_factory=list)
     removed_lines: list[int] = Field(default_factory=list)
+    added_text: list[str] = Field(default_factory=list)  # parallel to added_lines
+    removed_text: list[str] = Field(default_factory=list)  # parallel to removed_lines
 
     @property
     def added(self) -> int:
@@ -137,3 +139,26 @@ class ChangedUnit(BaseModel):
     @property
     def unit_id(self) -> str:
         return f"{self.path}::{self.name}"
+
+
+class RiskLevel(StrEnum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
+class RiskReason(BaseModel):
+    rule: str
+    points: int
+    message: str
+
+
+class RiskScore(BaseModel):
+    score: int = Field(ge=0, le=100)
+    level: RiskLevel
+    reasons: list[RiskReason] = Field(default_factory=list)
+
+
+class ScoredUnit(BaseModel):
+    unit: ChangedUnit
+    risk: RiskScore
