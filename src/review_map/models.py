@@ -2,7 +2,7 @@
 
 from enum import StrEnum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 
 class FileStatus(StrEnum):
@@ -184,3 +184,50 @@ class ClaimedScope(BaseModel):
     low_confidence: bool = False
     model: str | None = None  # "provider/model" when source is llm
     notes: list[str] = Field(default_factory=list)  # warnings and hints for the user
+
+
+class MatchLevel(StrEnum):
+    """How directly the description claims a changed unit (Phase 5)."""
+
+    FUNCTION = "function"  # named directly (or module-level code next to a named one)
+    FILE = "file"  # only its file is mentioned
+    FOLDER = "folder"  # only a folder containing it is mentioned
+    NONE = "none"  # not claimed at all
+
+
+class UnitCoverage(BaseModel):
+    unit_id: str  # same as ChangedUnit.unit_id, to join with risk scores
+    path: str
+    name: str
+    level: MatchLevel
+    claim: str | None = None  # the claim that covers it
+    note: str | None = None  # e.g. why a mentioned file still counts as unclaimed
+
+
+class MissingClaim(BaseModel):
+    kind: str  # "file" or "function"
+    claim: str
+
+
+class ScopeViolation(BaseModel):
+    item: str  # the out-of-scope text from the description
+    target: str  # the path or name taken from it
+    path: str
+    name: str | None = None  # unit name; None when the whole file is the violation
+
+
+class ScopeReport(BaseModel):
+    """Claimed scope vs. the actual diff. Built by plain code, never by an LLM."""
+
+    coverage: list[UnitCoverage] = Field(default_factory=list)
+    claimed_but_missing: list[MissingClaim] = Field(default_factory=list)
+    out_of_scope_violations: list[ScopeViolation] = Field(default_factory=list)
+    not_checkable: list[str] = Field(default_factory=list)  # out-of-scope prose, no names
+    skipped_files: list[str] = Field(default_factory=list)  # binary, generated or ignored
+    notes: list[str] = Field(default_factory=list)
+    low_confidence: bool = False  # claims came from the heuristic parser
+
+    @computed_field
+    @property
+    def unclaimed_changes(self) -> list[UnitCoverage]:
+        return [c for c in self.coverage if c.level is MatchLevel.NONE]

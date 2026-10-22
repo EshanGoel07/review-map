@@ -152,7 +152,18 @@ def _strip_markdown(line: str) -> str:
     return " ".join(line.split()).strip()
 
 
-def _names_in(line: str) -> tuple[list[str], list[str]]:
+def looks_like_path(text: str) -> bool:
+    """`src/auth/`, `auth.py` or `src/payments` (a slash and no spaces)."""
+    text = text.strip()
+    return bool(text) and " " not in text and ("/" in text or bool(_FILE.fullmatch(text)))
+
+
+def looks_like_identifier(text: str) -> bool:
+    """`login`, `UserService.login` or `refresh_token()`."""
+    return bool(_IDENTIFIER.match(text.strip()))
+
+
+def extract_names(line: str) -> tuple[list[str], list[str]]:
     """File paths and function-like names mentioned on one line."""
     line = _URL.sub(" ", line)
     files: list[str] = []
@@ -206,7 +217,7 @@ def heuristic_claims(text: str) -> ClaimedScope:
             out_of_scope.append(line)
             continue
 
-        line_files, line_functions = _names_in(raw)
+        line_files, line_functions = extract_names(raw)
         files += line_files
         functions += line_functions
         if _BULLET.match(raw):

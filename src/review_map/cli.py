@@ -1,5 +1,6 @@
 """Command-line interface for Review Map."""
 
+import json
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -19,8 +20,17 @@ from review_map.config import LoadedConfig, load_config
 from review_map.diff import git_source
 from review_map.diff.parser import parse_diff
 from review_map.errors import ReviewMapError
-from review_map.models import ChangedFile, ChangedUnit, ClaimedScope, FileStatus, RiskLevel
+from review_map.models import (
+    ChangedFile,
+    ChangedUnit,
+    ClaimedScope,
+    FileStatus,
+    MatchLevel,
+    RiskLevel,
+    ScopeReport,
+)
 from review_map.risk.rules import score_units
+from review_map.verify.scope import verify_scope
 
 app = typer.Typer(
     name="review-map",
@@ -324,6 +334,14 @@ def _print_claims(scope: ClaimedScope, desc: Path, cached: bool) -> None:
         err_console.print(f"\n[yellow]Note:[/] {escape(note)}")
 
 
+NoLLMOption = Annotated[
+    bool, typer.Option("--no-llm", help="Skip the LLM; use the heuristic parser.")
+]
+NoCacheOption = Annotated[
+    bool, typer.Option("--no-cache", help="Ask the LLM again instead of using the cache.")
+]
+
+
 @app.command()
 def claims(
     desc: Annotated[
@@ -333,12 +351,8 @@ def claims(
         ),
     ],
     config: ConfigOption = None,
-    no_llm: Annotated[
-        bool, typer.Option("--no-llm", help="Skip the LLM; use the heuristic parser.")
-    ] = False,
-    no_cache: Annotated[
-        bool, typer.Option("--no-cache", help="Ask the LLM again instead of using the cache.")
-    ] = False,
+    no_llm: NoLLMOption = False,
+    no_cache: NoCacheOption = False,
     as_json: Annotated[bool, typer.Option("--json", help="Print the claims as JSON.")] = False,
 ) -> None:
     """Turn a change description into a structured claimed scope (files, functions...).
@@ -356,6 +370,146 @@ def claims(
         typer.echo(scope.model_dump_json(indent=2))
     else:
         _print_claims(scope, desc, cached)
+
+
+DEFAULT_DESC = "changes.md"
+
+
+def _resolve_desc(desc: Path | None, root: Path) -> Path:
+    """`--desc` if given, else `changes.md` in the repo root."""
+    if desc is not None:
+        return desc
+    default = root / DEFAULT_DESC
+    if default.is_file():
+        return default
+    raise ReviewMapError(
+        f"No change description: pass --desc FILE (no {DEFAULT_DESC} in {root}).",
+        hint="Write what the change claims to do in changes.md, or pass the PR text with --desc.",
+    )
+
+
+def _repo_relative(path: Path, root: Path) -> str | None:
+    """`path` relative to the repo root, or None if it's stdin or outside the repo."""
+    if str(path) == "-":
+        return None
+    try:
+        return path.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        return None
+
+
+def _print_scope(report: ScopeReport, units_by_id: dict[str, ChangedUnit]) -> None:
+    counts = {level: sum(c.level is level for c in report.coverage) for level in MatchLevel}
+    console.print(
+        f"{_plural(len(report.coverage), 'changed unit')}: "
+        f"{counts[MatchLevel.FUNCTION]} claimed by name, {counts[MatchLevel.FILE]} by file, "
+        f"{counts[MatchLevel.FOLDER]} by folder, "
+        f"[bold red]{counts[MatchLevel.NONE]} unclaimed[/]"
+    )
+
+    unclaimed = report.unclaimed_changes
+    console.print(f"\n[bold]Unclaimed changes[/] ({len(unclaimed)})")
+    if unclaimed:
+        table = Table(show_edge=False, header_style="bold")
+        table.add_column("File", overflow="fold")
+        table.add_column("Unit", overflow="fold")
+        table.add_column("Lines", justify="right")
+        table.add_column("Note", style="dim", overflow="fold")
+        for c in unclaimed:
+            table.add_row(
+                escape(c.path),
+                escape(c.name),
+                _line_range(units_by_id[c.unit_id]),
+                escape(c.note or "not mentioned"),
+            )
+        console.print(table)
+    else:
+        console.print("  [dim](none)[/]")
+
+    violations = report.out_of_scope_violations
+    console.print(f"\n[bold]Out-of-scope violations[/] ({len(violations)})")
+    for v in violations:
+        where = f"{v.path}:{v.name}" if v.name else v.path
+        console.print(
+            f"  • [red]{escape(where)}[/] changed, but the description says it is out of "
+            f'scope: "{escape(v.item)}"'
+        )
+    if not violations:
+        console.print("  [dim](none)[/]")
+
+    missing = report.claimed_but_missing
+    console.print(f"\n[bold]Claimed but not changed[/] ({len(missing)})")
+    for m in missing:
+        console.print(f"  • {m.kind} {escape(m.claim)}")
+    if not missing:
+        console.print("  [dim](none)[/]")
+
+    if report.not_checkable:
+        console.print(
+            f"\n[dim]Out-of-scope items with no file or name to check: "
+            f"{escape('; '.join(report.not_checkable))}[/]"
+        )
+    if report.skipped_files:
+        console.print(
+            f"[dim]{_plural(len(report.skipped_files), 'file')} skipped "
+            "(binary, generated or ignored)[/]"
+        )
+
+
+@app.command()
+def verify(
+    repo: RepoOption = Path("."),
+    base: BaseOption = None,
+    head: HeadOption = "HEAD",
+    desc: Annotated[
+        Path | None,
+        typer.Option(
+            "--desc",
+            "-d",
+            help="Change description, or - for stdin. Default: changes.md in the repo root.",
+        ),
+    ] = None,
+    config: ConfigOption = None,
+    no_llm: NoLLMOption = False,
+    no_cache: NoCacheOption = False,
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Print the claims and the report as JSON.")
+    ] = False,
+) -> None:
+    """Check the description against the diff: unclaimed, missing and out-of-scope changes.
+
+    The comparison is plain code (no LLM); only reading the description may use one.
+    """
+    with friendly_errors():
+        change = _load_local(repo, base, head, config)
+        changed = _collect(change)
+        desc = _resolve_desc(desc, change.root)
+        scope, cached = parse_claims(
+            _read_description(desc),
+            change.loaded.config.llm,
+            use_llm=not no_llm,
+            use_cache=not no_cache,
+        )
+        report = verify_scope(scope, changed, change.files, _repo_relative(desc, change.root))
+    if as_json:
+        typer.echo(
+            json.dumps(
+                {"claims": scope.model_dump(mode="json"), "report": report.model_dump(mode="json")},
+                indent=2,
+            )
+        )
+        return
+
+    _print_header("Verify", change)
+    parser = scope.model or "heuristic parser"
+    confidence = " · [yellow]low confidence[/]" if scope.low_confidence else ""
+    console.print(
+        f"[dim]Claims from {escape(str(desc))} ({escape(parser)}"
+        f"{', cached' if cached else ''})[/]{confidence}"
+    )
+    _print_scope(report, {u.unit_id: u for u in changed})
+    for note in [*scope.notes, *report.notes]:
+        err_console.print(f"\n[yellow]Note:[/] {escape(note)}")
 
 
 if __name__ == "__main__":

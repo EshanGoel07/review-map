@@ -313,3 +313,73 @@
 - A tool should degrade gracefully: no key, bad key, rate limit or offline → still useful
   output, plus a note telling the user exactly what to fix. (This caught the retired model
   on the very first live run.)
+
+## Phase 5 — Scope verifier (deterministic)
+
+**Built**
+- `verify/scope.py`: `verify_scope(claims, units, files, description_path)` → `ScopeReport`.
+  No LLM: the same input always gives the same answer, and nothing in it reads instructions.
+  - Every changed unit gets a `MatchLevel`: `function` (named), `file`, `folder`, or `none`
+    (unclaimed), plus the claim that covered it and a note when useful.
+  - Path claims: exact; shortened (`session.py`, `auth/session.py`) on whole segments only;
+    folders with or without `/`, anywhere in the path; globs via the Phase 1 matcher; `./`,
+    `/` and `\` normalized; renamed files match by old or new path.
+  - Function claims: `login` matches `UserService.login`; a class covers its methods;
+    `auth.py:login` / `auth.py::login` limit to a file; `UserService::login` means a method;
+    Python dotted paths (`auth.session.refresh`) match file + name.
+  - **Sibling rule:** if a file's functions are named, its other changed functions are
+    unclaimed even though the file is mentioned. This is what catches a hidden edit next to a
+    claimed one.
+  - `<module>` code counts as covered when anything else in its file is claimed.
+  - Function renames are not paired automatically: naming only the new name leaves the removed
+    old one unclaimed (a false alarm is safer than hiding a deleted function).
+  - `claimed_but_missing`: file claims matching no changed file (generated/skipped files count,
+    so claiming a lockfile is fine) and function claims matching no unit.
+  - `out_of_scope_violations`: out-of-scope items containing a path or identifier (via Phase 4's
+    `extract_names`) are checked against changed units, or whole files when a file has no units
+    (e.g. pure renames). Prose-only items go to `not_checkable`.
+  - Wildcard-only claims (`**`, `.`) are ignored with a note, so an injected "claim everything"
+    can't hide changes. Folder/glob claims covering ≥ 10 files get a "broad claim" note.
+  - Binary, generated and ignored files are listed in `skipped_files`, never unclaimed. The
+    description file itself (e.g. `changes.md` in the repo) is not treated as a change.
+- `models.py`: `MatchLevel`, `UnitCoverage`, `MissingClaim`, `ScopeViolation`, `ScopeReport`
+  (`unclaimed_changes` is a computed field, so it's in the JSON).
+- `claims/parser.py`: `extract_names()` (was private), `looks_like_path()`, `looks_like_identifier()`.
+- CLI: `review-map verify [--repo] [--base] [--head] [--desc FILE|-] [--no-llm] [--no-cache]
+  [--json] [--config]`. `--desc` defaults to `changes.md` in the repo root; with neither, a
+  clear error (exit 2). Exit code is 0 otherwise; gating comes in Phase 6.
+
+**Files**
+`src/review_map/verify/scope.py`, `src/review_map/models.py`, `src/review_map/claims/parser.py`,
+`src/review_map/cli.py`, `tests/test_scope.py`, `tests/test_cli_verify.py`, `CHANGELOG.md`.
+
+**Tested**
+- `test_scope.py` (87, table-driven): 19 path-claim cases, 16 function-claim cases, coverage
+  table (function/file/folder/sibling/empty/elsewhere), sibling rule per file, file beats
+  folder, `<module>` cases, renamed files, function renames, skipped files, the description
+  file, missing claims, deleted files, out-of-scope (paths, prose, identifiers, file-level,
+  skipped files, dedupe, contradictions), wildcard and broad-claim notes, JSON output.
+- `test_cli_verify.py` (8): real temporary git repo with a hidden permission change; text and
+  JSON output, fake LLM claims, `--desc` outside the repo, stdin, missing description, empty
+  description, `--help`.
+- Mutation check: disabling the sibling rule makes 7 tests fail; restoring it passes.
+- `pytest -q` → 361 passed. `ruff check .` → all passed. `ruff format --check .` → clean.
+- Demo (live Groq): scratch repo where `changes.md` claims a pagination fix, but the diff also
+  loosens `can_edit` and removes a refund check in "untouched" payments code → `can_edit` and
+  `refund` unclaimed, one out-of-scope violation, `tests/test_views.py` claimed but missing.
+
+**Known limitations**
+- Short function claims match by name anywhere: `get` covers every changed `*.get` method.
+- Changes to class bodies (attributes) aren't covered by a claim naming one of its methods.
+- Out-of-scope prose ("the login form") can't be checked; that's deliberate, to avoid fuzzy
+  false alarms.
+- The verifier is only as good as the claims: a vague description ("refactored `src/`") covers a
+  lot at folder level. The match level and broad-claim note make that visible, and Phase 6
+  ranks by risk too.
+
+**What I should understand from this phase**
+- Use an LLM where language is messy (reading the description) and plain code where the answer
+  must be exact and trustworthy (comparing it with the diff).
+- Matching rules are product decisions: each one trades missed problems against false alarms.
+  For a review tool, a false alarm costs a few seconds; a hidden change can cost an incident.
+- Turning a rule off and watching tests fail (a mutation check) proves the tests protect it.

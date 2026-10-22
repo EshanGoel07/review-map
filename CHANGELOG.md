@@ -21,6 +21,9 @@ uses [Semantic Versioning](https://semver.org/).
   functions, behaviors, out of scope) with an LLM (Groq by default; Gemini, Anthropic, OpenAI
   and Ollama supported), with retries, a disk cache and prompt-injection defences. Without an
   LLM, a heuristic parser is used and the result is marked low confidence.
+- `review-map verify`: compare the claimed scope with the actual diff, without an LLM, and list
+  unclaimed changes, claims with no matching change, and out-of-scope violations. Matches
+  files, folders, globs and functions; flags unnamed functions next to named ones.
 
 ### Fixed
 - Pin `tree-sitter<0.26`: 0.26.0 segfaults when parsing larger files repeatedly.
