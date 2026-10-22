@@ -162,3 +162,25 @@ class RiskScore(BaseModel):
 class ScoredUnit(BaseModel):
     unit: ChangedUnit
     risk: RiskScore
+
+
+class ClaimSource(StrEnum):
+    LLM = "llm"
+    HEURISTIC = "heuristic"
+
+
+class ClaimedScope(BaseModel):
+    """What a change description claims was changed (Phase 4).
+
+    This is the author's *claim*, not the truth: the scope verifier (Phase 5)
+    checks it against the actual diff.
+    """
+
+    files: list[str] = Field(default_factory=list)  # files or folders (ending in "/")
+    functions: list[str] = Field(default_factory=list)  # e.g. "login", "UserService.login"
+    behaviors: list[str] = Field(default_factory=list)
+    out_of_scope: list[str] = Field(default_factory=list)
+    source: ClaimSource = ClaimSource.HEURISTIC
+    low_confidence: bool = False
+    model: str | None = None  # "provider/model" when source is llm
+    notes: list[str] = Field(default_factory=list)  # warnings and hints for the user

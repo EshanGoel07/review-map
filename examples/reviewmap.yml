@@ -18,8 +18,10 @@ reading_budget:
   lines_fraction: 0.15  # share of changed lines, between 0 and 1
   max_units: 5          # at most this many functions/sections
 
-# LLM used to read the PR description. Environment variables override this.
-# Without an API key, Review Map falls back to a heuristic mode.
+# LLM used to read the PR description. REVIEW_MAP_LLM_* env vars override this.
+# API keys never go here: put them in .env or in your CI secrets.
+# Without an API key, Review Map falls back to a heuristic (low-confidence) parser.
 llm:
-  provider: null  # groq | gemini | anthropic | openai | ollama
-  model: null     # e.g. llama-3.3-70b-versatile
+  provider: null  # groq | gemini | anthropic | openai | ollama; null = the first
+                  # provider whose key is set (Groq, Gemini, Anthropic, OpenAI)
+  model: null     # null = the provider's default, e.g. openai/gpt-oss-120b

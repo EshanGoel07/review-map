@@ -27,6 +27,9 @@ dependencies = [
     "tree-sitter-python>=0.25",
     "tree-sitter-javascript>=0.25",
     "tree-sitter-typescript>=0.23",
+    "openai>=1.40",
+    "anthropic>=0.40",
+    "python-dotenv>=1.0",
 ]
 
 [project.scripts]

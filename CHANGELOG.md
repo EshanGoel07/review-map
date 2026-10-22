@@ -17,6 +17,10 @@ uses [Semantic Versioning](https://semver.org/).
   (Python, JavaScript, TypeScript, TSX); deleted functions are reported by name.
 - `review-map score`: rule-based risk score (0-100, low/medium/high) for each changed unit
   with human-readable reasons; weights in one dict.
+- `review-map claims`: turn a change description into a structured claimed scope (files,
+  functions, behaviors, out of scope) with an LLM (Groq by default; Gemini, Anthropic, OpenAI
+  and Ollama supported), with retries, a disk cache and prompt-injection defences. Without an
+  LLM, a heuristic parser is used and the result is marked low confidence.
 
 ### Fixed
 - Pin `tree-sitter<0.26`: 0.26.0 segfaults when parsing larger files repeatedly.

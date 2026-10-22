@@ -7,17 +7,19 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
+from dotenv import find_dotenv, load_dotenv
 from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
 
 from review_map import __version__
+from review_map.claims.parser import parse_claims
 from review_map.code.functions import collect_units
 from review_map.config import LoadedConfig, load_config
 from review_map.diff import git_source
 from review_map.diff.parser import parse_diff
 from review_map.errors import ReviewMapError
-from review_map.models import ChangedFile, ChangedUnit, FileStatus, RiskLevel
+from review_map.models import ChangedFile, ChangedUnit, ClaimedScope, FileStatus, RiskLevel
 from review_map.risk.rules import score_units
 
 app = typer.Typer(
@@ -64,9 +66,15 @@ def _plural(n: int, word: str) -> str:
     return f"{n} {word}" if n == 1 else f"{n} {word}s"
 
 
+def load_env_file() -> None:
+    """Load `.env` from the current directory (or a parent). Real env vars win."""
+    load_dotenv(find_dotenv(usecwd=True), override=False)
+
+
 @app.callback()
 def main() -> None:
     """Review Map: get a short reading plan for a pull request."""
+    load_env_file()
 
 
 @app.command()
@@ -280,6 +288,74 @@ def score(
         f"{_plural(len(scored), 'unit')}: [bold red]{counts[RiskLevel.HIGH]} high[/], "
         f"[yellow]{counts[RiskLevel.MEDIUM]} medium[/], {counts[RiskLevel.LOW]} low{more}"
     )
+
+
+def _read_description(desc: Path) -> str:
+    if str(desc) == "-":
+        return typer.get_text_stream("stdin").read()
+    try:
+        return desc.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        raise ReviewMapError(f"Description file not found: {desc}") from None
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ReviewMapError(f"Could not read {desc}: {exc}") from None
+
+
+def _print_claims(scope: ClaimedScope, desc: Path, cached: bool) -> None:
+    parser = scope.model if scope.model else "heuristic parser"
+    extra = ", cached" if cached else ""
+    confidence = " · [yellow]low confidence[/]" if scope.low_confidence else ""
+    console.print(
+        f"[bold]Claims[/] from {escape(str(desc))}  [dim]({escape(parser)}{extra})[/]{confidence}"
+    )
+    sections = [
+        ("Files", scope.files),
+        ("Functions", scope.functions),
+        ("Behaviors", scope.behaviors),
+        ("Out of scope", scope.out_of_scope),
+    ]
+    for title, items in sections:
+        console.print(f"\n[bold]{title}[/] ({len(items)})")
+        for item in items:
+            console.print(f"  • {escape(item)}")
+        if not items:
+            console.print("  [dim](none)[/]")
+    for note in scope.notes:
+        err_console.print(f"\n[yellow]Note:[/] {escape(note)}")
+
+
+@app.command()
+def claims(
+    desc: Annotated[
+        Path,
+        typer.Option(
+            "--desc", "-d", help="Change description (e.g. changes.md), or - to read stdin."
+        ),
+    ],
+    config: ConfigOption = None,
+    no_llm: Annotated[
+        bool, typer.Option("--no-llm", help="Skip the LLM; use the heuristic parser.")
+    ] = False,
+    no_cache: Annotated[
+        bool, typer.Option("--no-cache", help="Ask the LLM again instead of using the cache.")
+    ] = False,
+    as_json: Annotated[bool, typer.Option("--json", help="Print the claims as JSON.")] = False,
+) -> None:
+    """Turn a change description into a structured claimed scope (files, functions...).
+
+    The description is treated as untrusted data. The LLM is set in .env (see
+    .env.example); without one, a heuristic parser is used.
+    """
+    with friendly_errors():
+        text = _read_description(desc)
+        loaded = load_config(Path.cwd(), config)
+        scope, cached = parse_claims(
+            text, loaded.config.llm, use_llm=not no_llm, use_cache=not no_cache
+        )
+    if as_json:
+        typer.echo(scope.model_dump_json(indent=2))
+    else:
+        _print_claims(scope, desc, cached)
 
 
 if __name__ == "__main__":

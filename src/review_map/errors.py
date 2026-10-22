@@ -28,3 +28,7 @@ class GitError(ReviewMapError):
 
 class ConfigError(ReviewMapError):
     """`.reviewmap.yml` is missing required structure or has invalid values."""
+
+
+class LLMError(ReviewMapError):
+    """The LLM is misconfigured, unreachable, or kept returning invalid output."""

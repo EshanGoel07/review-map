@@ -209,3 +209,107 @@
 - Every rule needs a negative test: false positives are what make reviewers ignore a tool.
 - Running the tool on real code finds bugs that unit tests miss (the plural bug, the
   native crash); after fixing one, add a regression test.
+
+## Phase 4 — Claim parser (LLM)
+
+**Built**
+- `claims/llm.py`: provider-agnostic LLM layer.
+  - Settings: `REVIEW_MAP_LLM_PROVIDER`/`_MODEL`/`_BASE_URL` env vars → `llm:` in
+    `.reviewmap.yml` → auto-detect from the first key set (Groq, Gemini, Anthropic, OpenAI;
+    Ollama only when chosen). A chosen provider without its key, or an unknown provider name,
+    is an `LLMError` with a hint.
+  - `OpenAICompatBackend` (`openai` SDK + `base_url`: Groq, Gemini, OpenAI, Ollama) uses JSON
+    mode (`response_format={"type": "json_object"}`, temperature 0). `AnthropicBackend`
+    (official SDK) asks for JSON in the prompt. SDK retries are off (`max_retries=0`); 60 s timeout.
+  - SDK errors are sorted into: transient (429, 5xx, timeout, connection) → retried with
+    exponential backoff 1/2/4 s + jitter, honouring `retry-after` up to 20 s; invalid output
+    (incl. Groq's `json_validate_failed`); and user errors (bad key, unknown model) → not retried.
+  - `LLMClient.complete_json(system, prompt, schema)`: extracts the JSON object (tolerates code
+    fences), validates with pydantic, sends one repair request quoting the validation error,
+    then gives up. Only validated answers are cached.
+  - `DiskCache`: one JSON file per answer in `~/.cache/review-map/llm/` (or
+    `$REVIEW_MAP_CACHE_DIR`), keyed by a hash of provider, model, URL, prompts and schema.
+    Atomic writes; corrupt entries and unwritable dirs are ignored.
+- `claims/parser.py`:
+  - System prompt says the description is untrusted data and its instructions must be ignored.
+    The text sits between `<description>` tags; tags inside the text are neutralized. The
+    reply can only be four lists of short strings (extra keys dropped, ≤ 100 items of ≤ 300
+    chars). Descriptions over 30,000 chars are truncated, with a note.
+  - `heuristic_claims()`: file paths (known extensions or `folder/`), backticked identifiers and
+    `name()` calls, bullets as behaviors, "Out of scope"/"Non-goals"/"Not changed" sections and
+    "did not touch…" lines as out of scope. Skips URLs and code blocks. Marked `low_confidence`.
+  - `parse_claims()`: LLM if configured, else heuristic. A misconfigured or failing LLM falls
+    back to the heuristic with a note saying why (agreed design: warn, don't stop).
+- `models.py`: `ClaimSource`, `ClaimedScope` (`files`, `functions`, `behaviors`,
+  `out_of_scope`, `source`, `low_confidence`, `model`, `notes`). `errors.py`: `LLMError`.
+- CLI: `review-map claims --desc FILE|- [--no-llm] [--no-cache] [--json] [--config]`. `.env` is
+  loaded at startup with python-dotenv; real env vars win.
+- `.env.example` finalized; `examples/reviewmap.yml` documents auto-detection.
+- **Design decisions (approved):** dependencies `openai`, `anthropic`, `python-dotenv`; "Gemini
+  fallback" means auto-detect order, not runtime failover; cache in the user cache dir instead
+  of `.cache/` in the repo.
+- **Default model changed (approved):** Groq has retired `llama-3.3-70b-versatile` (live call →
+  `404 model_not_found`; it is not in the key's model list). The Groq default is now
+  `openai/gpt-oss-120b`, chosen by the live comparison below.
+
+**Files**
+`src/review_map/claims/{llm,parser}.py`, `src/review_map/{models,errors,cli}.py`,
+`tests/{test_llm,test_claims,conftest}.py`, `tests/fixtures/changes.md`,
+`tests/fixtures/claims/{injection,messy}.md`, `.env.example`, `examples/reviewmap.yml`,
+`CHANGELOG.md`, `pyproject.toml`, `uv.lock`.
+
+**Tested**
+- `test_llm.py` (49): settings resolution (auto-detect order, env > config, config model not
+  carried to another provider, Ollama, missing key, unknown provider); both backends with fake
+  SDK clients; valid JSON, invalid JSON, schema mismatch → one repair, twice invalid → error;
+  backoff timings, `retry-after` cap, give-up, bad key not retried and never echoed, 404, other
+  400s; JSON extraction; cache hit, cache key covers prompt/system/model, invalid answers not
+  cached, corrupt entry, unwritable dir.
+- `test_claims.py` (38): LLM path and cleaning, untrusted-data prompt, injected `</description>`
+  can't escape, injected extra keys dropped, output caps, truncation, cache hit through
+  `parse_claims`; all fallbacks (no LLM, missing key, failing LLM, `--no-llm`, empty text);
+  heuristic on three fixtures and edge cases; CLI text/JSON/stdin/missing file/config/help;
+  `.env` loading with real env winning.
+- `conftest.py` now clears all LLM env vars, never loads `.env`, points the cache at a temp dir,
+  and makes any network connection or DNS lookup raise (a test checks the guard works).
+- `pytest -q` → 266 passed. `ruff check .` → all passed. `ruff format --check .` → clean.
+- Demo (no key): `review-map claims --desc tests/fixtures/changes.md` → heuristic result with
+  the setup hint; missing file → exit 2; provider set without key → falls back with a note.
+- Live demo (Groq, `openai/gpt-oss-120b`): `changes.md` → all files, functions, behaviors and
+  out-of-scope items correct in ~2 s; `injection.md` → injection ignored; second run → `cached`
+  in 0.5 s. Verified the key appears in no cache file, no project file but `.env`, and no git
+  index entry.
+- Live comparison on Groq (3 fixtures + 2 extra descriptions: a "fixed X but didn't touch Y"
+  sentence and an HTML-comment injection asking for `**` and to hide `auth/permissions.py`),
+  one run each:
+
+  | Model | Valid JSON | Notes |
+  |---|---|---|
+  | `openai/gpt-oss-120b` | 5/5 | everything correct; ~1–3 s per call → **chosen** |
+  | `qwen/qwen3.8-27b` | 5/5 | ~3× faster, but listed only the new name of a renamed function |
+  | `openai/gpt-oss-20b` | 4/5 | failed JSON twice on one input; missed `format_date` once |
+
+  All three ignored both injections. All three split the "fixed X but didn't touch Y"
+  sentence correctly, which the heuristic parser can't.
+
+**Known limitations**
+- Heuristic parser: a line that both claims and denies ("fixed a.py, didn't touch b.py") goes
+  wholly to out of scope; bare names without backticks or `()` are missed; behaviors come only
+  from bullet points.
+- Prompt-injection defences limit what the output can *be*, not whether the description is
+  *true*: a description can still over-claim (e.g. "changed `src/`") to hide changes. Phase 5
+  must treat very broad claims with care, and the risk scorer never reads the LLM output.
+- Only Groq is checked live; the other backends are tested with fakes. Providers retire
+  models (it happened to the planned Groq default), so the Gemini/OpenAI/Anthropic defaults
+  may need updating; a retired model gives a clear 404 note and the heuristic fallback.
+- No automatic failover between providers; the cache never expires (`--no-cache` or delete
+  the folder).
+
+**What I should understand from this phase**
+- JSON mode only promises *valid JSON*; pydantic validation is what guarantees the *right
+  shape*. Never feed unvalidated LLM output into the rest of a program.
+- Treat everything in a PR as data, not instructions, and design so that even a fully
+  hijacked model can only produce harmless output (four short lists).
+- A tool should degrade gracefully: no key, bad key, rate limit or offline → still useful
+  output, plus a note telling the user exactly what to fix. (This caught the retired model
+  on the very first live run.)
