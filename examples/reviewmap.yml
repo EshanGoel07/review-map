@@ -17,6 +17,7 @@ sensitive_paths: []
 reading_budget:
   lines_fraction: 0.15  # share of changed lines, between 0 and 1
   max_units: 5          # at most this many functions/sections
+  min_lines: 40         # but always allow at least this many lines
 
 # LLM used to read the PR description. REVIEW_MAP_LLM_* env vars override this.
 # API keys never go here: put them in .env or in your CI secrets.

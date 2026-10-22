@@ -383,3 +383,82 @@
 - Matching rules are product decisions: each one trades missed problems against false alarms.
   For a review tool, a false alarm costs a few seconds; a hidden change can cost an incident.
 - Turning a rule off and watching tests fail (a mutation check) proves the tests protect it.
+
+## Phase 6 — Reading plan and reports
+
+**Built**
+- `report/plan.py`: `build_plan()` combines Phase 3 risk scores with the Phase 5 scope report.
+  - priority = risk + scope boost, capped at 100: out-of-scope violation +30 (replaces the
+    unclaimed boost), unclaimed +20, folder-only claim +5; boosts halved for heuristic
+    (low-confidence) claims; no description → no boosts plus a note. The risk score itself is
+    never changed, so both reasons stay visible.
+  - Budget: walk units by priority; "read carefully" while ≤ `max_units` (5) and ≤
+    max(`lines_fraction` × changed lines, `min_lines`) lines (15%, floor 40). Only priority ≥ 30
+    qualifies; the top qualifying unit is always included; a too-big unit is skipped so a
+    smaller one can still fit. Nothing qualifying → "Nothing stands out. Skim everything."
+  - Units the verifier didn't check (the description file) get no scope verdict.
+  - `gate_failed()` for `--fail-on high|medium`, based on priority (so medium risk + unclaimed
+    can fail a high gate).
+- `models.py`: `PlanSection`, `PlanItem`, `PlanSummary`, `ReadingPlan`.
+- Renderers:
+  - `render_md.py`: summary line, heads-up, **Read carefully** table, **Unmentioned changes**,
+    **Claimed but not changed**, collapsible "Safe to skim", notes, footer `<!-- review-map -->`.
+    All PR-supplied text is escaped (no links, images, raw HTML or @-mentions; code-span
+    fences longer than any backtick run; pipes escaped in table cells).
+  - `render_json.py`: hand-built, documented schema (`schema_version: 1`); source code text is
+    not included.
+  - `render_html.py` + `templates/report.html.j2`: one offline file (no JS, no external
+    resources), light/dark mode, stats, plan with anchors, then each file's diff with flagged
+    lines marked and a reason note above each flagged section; flagged files first and open.
+    Jinja2 autoescaping on. Diffs capped at 3,000 rows per file.
+- CLI `review-map analyze [--repo] [--base] [--head] [--desc FILE|-] [--format
+  text|md|json|html] [--out FILE] [--fail-on high|medium] [--no-llm] [--no-cache] [--config]`.
+  `changes.md` in the repo root is used if present; otherwise the scope check is skipped.
+  `html` writes `report.html` by default. Exit codes: 0 ok, 1 gate failed, 2 user error.
+- Config: `reading_budget.min_lines` (default 40).
+- `examples/demo_repo/`: `base/`, `head/`, `changes.md`, `build.py` (stdlib + git) and a README.
+  The branch paginates the notes list (claimed) and quietly lets anyone delete shared notes
+  (not claimed; the description even says permissions are unchanged).
+- New dependency: `jinja2` (listed in PLAN.md's tech stack).
+
+**Files**
+`src/review_map/report/{plan,render_md,render_json,render_html}.py`,
+`src/review_map/report/templates/report.html.j2`, `src/review_map/{models,config,cli}.py`,
+`examples/demo_repo/**`, `examples/reviewmap.yml`, `tests/{test_plan,test_render,test_cli_analyze,test_config}.py`,
+`tests/snapshots/{reading_plan.md,reading_plan_no_description.md,reading_plan.json}` (not `plan.md`: on macOS the `PLAN.md` ignore rule matches it case-insensitively), `CHANGELOG.md`, `pyproject.toml`, `uv.lock`.
+
+**Tested**
+- `test_plan.py` (31): every boost (incl. violation vs. contradiction), halving, no description,
+  cap, ordering, max units, priority floor, line-budget floor vs. fraction, oversized top unit,
+  smaller unit filling the budget, config budget, summary, gate levels, gate on priority.
+- `test_render.py` (29): Markdown and JSON snapshots (golden files, `UPDATE_SNAPSHOTS=1` to
+  regenerate) on a scenario with a hidden permission change, a claimed change, a lockfile and
+  a pure rename into an out-of-scope folder; escaping tables for hostile text; JSON shape;
+  HTML content, highlights, anchors, file order, self-containment, XSS escaping, truncation.
+- `test_cli_analyze.py` (20): text/md/json/html output, default `report.html`, `--out` for every
+  format, unwritable path, no description, LLM claims via a fake client, gate exit codes,
+  harmless change passes, gate with file output, bad format, help; demo repo build → `can_delete`
+  ranked #1 and the gate fails; build refuses a non-empty folder.
+- Looked at the HTML report in Chrome (served on localhost): layout, notes and highlights OK;
+  fixed the note font.
+- Built the wheel, installed it in a clean venv: the template ships and HTML renders.
+- `pytest -q` → 442 passed. `ruff check .` → all passed. `ruff format --check .` → clean.
+- Demo (live Groq): `python examples/demo_repo/build.py /tmp/review-map-demo` then
+  `review-map analyze --repo /tmp/review-map-demo --base main` → `can_delete` #1 at 90 high
+  ("out of scope: notes/permissions.py", loosened condition); `--fail-on high` → exit 1.
+
+**Known limitations**
+- Boost sizes and the budget are hand-picked; Phase 10/11 measure the real trade-offs.
+- The heuristic parser treats backticked parameters (`page`) as function names, so the demo
+  without an LLM shows them as "claimed but not changed".
+- The HTML shows only the diff hunks, not the whole function around them.
+- Markdown escaping targets GitHub-flavoured Markdown; other renderers may differ.
+
+**What I should understand from this phase**
+- Keep signals separate (risk vs. scope) and combine them only at the end, so each one stays
+  explainable and replaceable.
+- A budget is a product decision: a short plan that gets read beats a complete one that
+  doesn't. Floors and caps stop the rule from breaking on tiny or huge changes.
+- Every output is an attack surface when its input is untrusted: escape for the format
+  you're writing (HTML, Markdown), and test it with hostile input.
+- Snapshot tests freeze an output format; regenerating them is a deliberate, reviewed act.

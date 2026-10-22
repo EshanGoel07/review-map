@@ -231,3 +231,85 @@ class ScopeReport(BaseModel):
     @property
     def unclaimed_changes(self) -> list[UnitCoverage]:
         return [c for c in self.coverage if c.level is MatchLevel.NONE]
+
+
+class PlanSection(StrEnum):
+    READ_CAREFULLY = "read_carefully"
+    SKIM = "skim"
+
+
+class PlanItem(BaseModel):
+    """One changed unit in the reading plan: risk, scope, and where it landed (Phase 6).
+
+    `priority` = risk score + scope boost (capped at 100). The risk score itself is
+    left unchanged so both reasons stay visible.
+    """
+
+    unit: ChangedUnit
+    risk: RiskScore
+    scope_level: MatchLevel | None = None  # None: no description, so scope not checked
+    scope_reasons: list[str] = Field(default_factory=list)
+    out_of_scope_items: list[str] = Field(default_factory=list)  # items this change violates
+    boost: int = 0
+    priority: int = Field(ge=0, le=100)
+    level: RiskLevel  # from priority, same thresholds as risk levels
+    section: PlanSection = PlanSection.SKIM
+    rank: int | None = None  # 1-based order within "read carefully"
+
+    @property
+    def unit_id(self) -> str:
+        return self.unit.unit_id
+
+    @property
+    def is_unmentioned(self) -> bool:
+        """Unclaimed, or changed although the description says it's out of scope."""
+        return self.scope_level is MatchLevel.NONE or bool(self.out_of_scope_items)
+
+
+class PlanSummary(BaseModel):
+    files_changed: int
+    files_skipped: int
+    units_changed: int
+    lines_changed: int
+    budget_lines: int
+    max_units: int
+    read_units: int
+    read_lines: int
+
+
+class ReadingPlan(BaseModel):
+    base: str
+    head: str
+    base_sha: str | None = None
+    head_sha: str | None = None
+    description: str | None = None  # where the claims came from, e.g. "changes.md"
+    claims: ClaimedScope | None = None
+    scope: ScopeReport | None = None
+    items: list[PlanItem] = Field(default_factory=list)  # every unit, highest priority first
+    summary: PlanSummary
+    skipped_files: list[str] = Field(default_factory=list)  # binary, generated or ignored
+    notes: list[str] = Field(default_factory=list)
+
+    @property
+    def read_carefully(self) -> list[PlanItem]:
+        return [i for i in self.items if i.section is PlanSection.READ_CAREFULLY]
+
+    @property
+    def skim(self) -> list[PlanItem]:
+        return [i for i in self.items if i.section is PlanSection.SKIM]
+
+    @property
+    def unmentioned(self) -> list[PlanItem]:
+        return [i for i in self.items if i.is_unmentioned]
+
+    @property
+    def file_violations(self) -> list[ScopeViolation]:
+        """Out-of-scope files changed without any unit (e.g. pure renames)."""
+        return (
+            [v for v in self.scope.out_of_scope_violations if v.name is None] if self.scope else []
+        )
+
+    @property
+    def highest_level(self) -> RiskLevel | None:
+        order = [RiskLevel.HIGH, RiskLevel.MEDIUM, RiskLevel.LOW]
+        return next((lvl for lvl in order if any(i.level is lvl for i in self.items)), None)

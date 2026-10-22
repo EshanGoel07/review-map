@@ -1,9 +1,11 @@
 """Command-line interface for Review Map."""
 
+import io
 import json
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import Annotated
 
@@ -19,16 +21,21 @@ from review_map.code.functions import collect_units
 from review_map.config import LoadedConfig, load_config
 from review_map.diff import git_source
 from review_map.diff.parser import parse_diff
-from review_map.errors import ReviewMapError
+from review_map.errors import EXIT_GATE_FAILED, ReviewMapError
 from review_map.models import (
     ChangedFile,
     ChangedUnit,
     ClaimedScope,
     FileStatus,
     MatchLevel,
+    ReadingPlan,
     RiskLevel,
     ScopeReport,
 )
+from review_map.report.plan import all_reasons, build_plan, gate_failed, line_range
+from review_map.report.render_html import render_html
+from review_map.report.render_json import render_json
+from review_map.report.render_md import render_markdown
 from review_map.risk.rules import score_units
 from review_map.verify.scope import verify_scope
 
@@ -510,6 +517,202 @@ def verify(
     _print_scope(report, {u.unit_id: u for u in changed})
     for note in [*scope.notes, *report.notes]:
         err_console.print(f"\n[yellow]Note:[/] {escape(note)}")
+
+
+class OutputFormat(StrEnum):
+    TEXT = "text"
+    MD = "md"
+    JSON = "json"
+    HTML = "html"
+
+
+class FailOn(StrEnum):
+    HIGH = "high"
+    MEDIUM = "medium"
+
+
+DEFAULT_HTML_OUT = Path("report.html")
+
+
+def _print_plan(plan: ReadingPlan, con: Console) -> None:
+    s = plan.summary
+    read = plan.read_carefully
+    con.print(
+        f"\n[bold]Read carefully[/] ({len(read)} of {_plural(s.units_changed, 'section')}, "
+        f"{s.read_lines} of {_plural(s.lines_changed, 'changed line')}; "
+        f"budget {s.budget_lines} lines, {s.max_units} sections)"
+    )
+    if read:
+        table = Table(show_edge=False, header_style="bold")
+        table.add_column("#", justify="right", style="dim")
+        table.add_column("Priority", justify="right")
+        table.add_column("Unit", overflow="fold", ratio=2)
+        table.add_column("Why", overflow="fold", ratio=3)
+        for item in read:
+            style = _LEVEL_STYLE[item.level]
+            why = [f"[bold red]{escape(r)}[/]" for r in item.scope_reasons]
+            why += [escape(r) for r in all_reasons(item)[len(item.scope_reasons) :]]
+            table.add_row(
+                str(item.rank),
+                f"[{style}]{item.priority} {item.level.value}[/]",
+                f"{escape(item.unit.path)}:{line_range(item)}\n[bold]{escape(item.unit.name)}[/]",
+                "; ".join(why) or "-",
+            )
+        con.print(table)
+    else:
+        con.print("  [dim]Nothing stands out. Skim everything.[/]")
+
+    unmentioned = plan.unmentioned
+    if unmentioned or plan.file_violations:
+        con.print(
+            f"\n[bold]Unmentioned changes[/] ({len(unmentioned) + len(plan.file_violations)})"
+        )
+        for item in unmentioned:
+            con.print(
+                f"  • [red]{escape(item.unit.path)}:{escape(item.unit.name)}[/] "
+                f"{escape('; '.join(item.scope_reasons))}"
+            )
+        for v in plan.file_violations:
+            con.print(f'  • [red]{escape(v.path)}[/] out of scope: "{escape(v.item)}"')
+
+    if plan.scope and plan.scope.claimed_but_missing:
+        con.print(f"\n[bold]Claimed but not changed[/] ({len(plan.scope.claimed_but_missing)})")
+        for m in plan.scope.claimed_but_missing:
+            con.print(f"  • {m.kind} {escape(m.claim)}")
+
+    skim = plan.skim
+    if skim:
+        names = ", ".join(escape(i.unit.name) for i in skim[:8])
+        more = f" and {len(skim) - 8} more" if len(skim) > 8 else ""
+        con.print(
+            f"\n[bold]Safe to skim[/]: {_plural(len(skim), 'section')} [dim]({names}{more})[/]"
+        )
+    if s.files_skipped:
+        con.print(
+            f"[dim]{_plural(s.files_skipped, 'file')} skipped (binary, generated or ignored)[/]"
+        )
+
+
+def _write(path: Path, content: str) -> None:
+    try:
+        path.write_text(content, encoding="utf-8")
+    except OSError as exc:
+        raise ReviewMapError(
+            f"Could not write {path}: {exc.strerror or exc}",
+            hint="Check that the folder exists and is writable.",
+        ) from None
+
+
+@app.command()
+def analyze(
+    repo: RepoOption = Path("."),
+    base: BaseOption = None,
+    head: HeadOption = "HEAD",
+    desc: Annotated[
+        Path | None,
+        typer.Option(
+            "--desc",
+            "-d",
+            help="Change description, or - for stdin. Default: changes.md in the repo root, "
+            "if any; without one the scope check is skipped.",
+        ),
+    ] = None,
+    output_format: Annotated[
+        OutputFormat, typer.Option("--format", "-f", help="Output format.")
+    ] = OutputFormat.TEXT,
+    out: Annotated[
+        Path | None,
+        typer.Option(
+            "--out", "-o", help="Write to this file. Default: the terminal (html: report.html)."
+        ),
+    ] = None,
+    fail_on: Annotated[
+        FailOn | None,
+        typer.Option(
+            "--fail-on",
+            help="Exit with code 1 if any change reaches this priority (for CI gates).",
+        ),
+    ] = None,
+    config: ConfigOption = None,
+    no_llm: NoLLMOption = False,
+    no_cache: NoCacheOption = False,
+) -> None:
+    """Build the reading plan: what to read carefully, in which order, and what to skim.
+
+    Combines the risk score of every changed function with a check of the description
+    against the diff. Unmentioned changes are boosted.
+    """
+    with friendly_errors():
+        change = _load_local(repo, base, head, config)
+        changed = _collect(change)
+        scored = score_units(changed, change.files, change.loaded.config)
+
+        claims = scope = None
+        description = None
+        cached = False
+        if desc is not None or (change.root / DEFAULT_DESC).is_file():
+            desc = _resolve_desc(desc, change.root)
+            rel = _repo_relative(desc, change.root)
+            description = "stdin" if str(desc) == "-" else (rel or str(desc))
+            claims, cached = parse_claims(
+                _read_description(desc),
+                change.loaded.config.llm,
+                use_llm=not no_llm,
+                use_cache=not no_cache,
+            )
+            scope = verify_scope(claims, changed, change.files, rel)
+
+        plan = build_plan(
+            scored,
+            change.files,
+            change.loaded.config.reading_budget,
+            base=change.base,
+            head=change.head,
+            base_sha=change.merge_base,
+            head_sha=change.head_sha,
+            claims=claims,
+            scope=scope,
+            description=description,
+        )
+
+        if output_format is OutputFormat.TEXT:
+            con = Console(file=io.StringIO(), record=True, width=120) if out else console
+            _print_header("Review Map", change)  # header always goes to the terminal
+            if claims is not None:
+                source = claims.model or "heuristic parser"
+                confidence = " · [yellow]low confidence[/]" if claims.low_confidence else ""
+                console.print(
+                    f"[dim]Claims from {escape(description or '')} ({escape(source)}"
+                    f"{', cached' if cached else ''})[/]{confidence}"
+                )
+            _print_plan(plan, con)
+            if out:
+                _write(out, con.export_text())
+                console.print(f"Wrote {escape(str(out))}")
+        else:
+            rendered = {
+                OutputFormat.MD: lambda: render_markdown(plan),
+                OutputFormat.JSON: lambda: render_json(plan),
+                OutputFormat.HTML: lambda: render_html(plan, change.files),
+            }[output_format]()
+            target = out or (DEFAULT_HTML_OUT if output_format is OutputFormat.HTML else None)
+            if target is None:
+                typer.echo(rendered, nl=False)
+            else:
+                _write(target, rendered)
+                err_console.print(f"Wrote {escape(str(target))}")
+
+    if output_format is OutputFormat.TEXT:
+        for note in plan.notes:
+            err_console.print(f"\n[yellow]Note:[/] {escape(note)}")
+
+    failing = gate_failed(plan, fail_on.value if fail_on else None)
+    if failing:
+        err_console.print(
+            f"[bold red]Gate failed[/] (--fail-on {fail_on.value}): "
+            f"{_plural(len(failing), 'section')} at {fail_on.value} priority or above."
+        )
+        raise typer.Exit(EXIT_GATE_FAILED)
 
 
 if __name__ == "__main__":

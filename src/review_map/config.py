@@ -27,6 +27,7 @@ class ReadingBudget(_Strict):
 
     lines_fraction: float = Field(default=0.15, gt=0, le=1)
     max_units: int = Field(default=5, ge=1)
+    min_lines: int = Field(default=40, ge=0)  # floor, so small changes aren't cut to ~1 line
 
 
 class LLMSettings(_Strict):

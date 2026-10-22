@@ -24,6 +24,12 @@ uses [Semantic Versioning](https://semver.org/).
 - `review-map verify`: compare the claimed scope with the actual diff, without an LLM, and list
   unclaimed changes, claims with no matching change, and out-of-scope violations. Matches
   files, folders, globs and functions; flags unnamed functions next to named ones.
+- `review-map analyze`: the reading plan. Combines risk scores with the scope check (unmentioned
+  changes are boosted), picks what to read carefully within a reading budget, and renders it
+  as terminal text, Markdown (with a `<!-- review-map -->` marker), stable JSON
+  (`schema_version: 1`) or a self-contained HTML report. `--fail-on high|medium` gates CI.
+- `reading_budget.min_lines` config setting (default 40).
+- `examples/demo_repo/`: a demo change whose description hides a weakened permission check.
 
 ### Fixed
 - Pin `tree-sitter<0.26`: 0.26.0 segfaults when parsing larger files repeatedly.

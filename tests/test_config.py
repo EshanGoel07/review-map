@@ -14,6 +14,7 @@ def test_missing_config_uses_defaults(tmp_path: Path):
     assert loaded.config == Config()
     assert loaded.config.reading_budget.lines_fraction == 0.15
     assert loaded.config.reading_budget.max_units == 5
+    assert loaded.config.reading_budget.min_lines == 40
     assert loaded.config.llm.provider is None
 
 
@@ -96,6 +97,7 @@ def test_unknown_key_rejected():
         ("reading_budget:\n  lines_fraction: 1.5\n", "reading_budget.lines_fraction"),
         ("reading_budget:\n  lines_fraction: 0\n", "reading_budget.lines_fraction"),
         ("reading_budget:\n  max_units: 0\n", "reading_budget.max_units"),
+        ("reading_budget:\n  min_lines: -1\n", "reading_budget.min_lines"),
         ("llm:\n  provider: skynet\n", "llm.provider"),
         ("ignore: 'not-a-list'\n", "ignore"),
     ],

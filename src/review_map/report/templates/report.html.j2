@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="generator" content="Review Map {{ version }}">
+<title>Review Map: {{ plan.base }}...{{ plan.head }}</title>
+<style>
+  :root {
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    --bg: #ffffff; --fg: #1f2328; --muted: #656d76; --border: #d0d7de; --panel: #f6f8fa;
+    --add-bg: #e6ffec; --del-bg: #ffebe9; --hunk-bg: #ddf4ff;
+    --high: #cf222e; --high-bg: #ffebe9; --medium: #9a6700; --medium-bg: #fff8c5;
+    --low: #656d76; --low-bg: #f6f8fa; --accent: #0969da;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0d1117; --fg: #e6edf3; --muted: #8d96a0; --border: #30363d; --panel: #161b22;
+      --add-bg: #12261e; --del-bg: #25171c; --hunk-bg: #121d2f;
+      --high: #ff7b72; --high-bg: #3a1d20; --medium: #d29922; --medium-bg: #332a12;
+      --low: #8d96a0; --low-bg: #161b22; --accent: #4493f8;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+         font: 15px/1.5 var(--sans); }
+  main { max-width: 1200px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 24px; margin: 0 0 4px; }
+  h2 { font-size: 18px; margin: 32px 0 12px; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
+  code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
+  .muted { color: var(--muted); }
+  .meta { color: var(--muted); margin-bottom: 16px; overflow-wrap: anywhere; }
+  .stats { display: flex; flex-wrap: wrap; gap: 12px; margin: 16px 0; }
+  .stat { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; min-width: 140px; }
+  .stat b { display: block; font-size: 22px; }
+  .banner { border: 1px solid var(--high); background: var(--high-bg); border-radius: 8px; padding: 10px 14px; margin: 16px 0; }
+  .badge { display: inline-block; border-radius: 999px; padding: 0 8px; font-size: 12px; font-weight: 600; white-space: nowrap; }
+  .badge.high { color: var(--high); background: var(--high-bg); border: 1px solid var(--high); }
+  .badge.medium { color: var(--medium); background: var(--medium-bg); border: 1px solid var(--medium); }
+  .badge.low { color: var(--low); background: var(--low-bg); border: 1px solid var(--border); }
+  ol.plan { padding-left: 0; list-style: none; }
+  ol.plan li { border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; margin-bottom: 8px; }
+  ol.plan li a { color: var(--accent); text-decoration: none; overflow-wrap: anywhere; }
+  ul.reasons { margin: 6px 0 0; padding-left: 20px; }
+  ul.reasons li { border: 0; padding: 0; margin: 0; }
+  .scope { color: var(--high); font-weight: 600; }
+  details.file { border: 1px solid var(--border); border-radius: 8px; margin-bottom: 12px; overflow: hidden; }
+  details.file > summary { cursor: pointer; padding: 8px 12px; background: var(--panel); overflow-wrap: anywhere; }
+  .diff-wrap { overflow-x: auto; }
+  table.diff { border-collapse: collapse; width: 100%; }
+  table.diff td { padding: 0 8px; vertical-align: top; white-space: pre; }
+  td.ln { color: var(--muted); text-align: right; user-select: none; width: 1%; }
+  tr.added td.code { background: var(--add-bg); }
+  tr.removed td.code { background: var(--del-bg); }
+  tr.hunk td { background: var(--hunk-bg); color: var(--muted); }
+  tr.flag-high td.ln { box-shadow: inset 4px 0 var(--high); }
+  tr.flag-medium td.ln { box-shadow: inset 4px 0 var(--medium); }
+  tr.flag-low td.ln { box-shadow: inset 4px 0 var(--low); }
+  tr.note td { white-space: normal; padding: 8px 12px; border-top: 2px solid var(--border); font-family: var(--sans); font-size: 14px; }
+  tr.note.high td { background: var(--high-bg); border-color: var(--high); }
+  tr.note.medium td { background: var(--medium-bg); border-color: var(--medium); }
+  tr.note.low td { background: var(--low-bg); }
+  footer { margin-top: 40px; color: var(--muted); font-size: 13px; }
+  @media (max-width: 600px) { .stat { flex: 1 1 calc(50% - 12px); min-width: 0; } }
+</style>
+</head>
+<body>
+<main>
+<h1>Review Map: reading plan</h1>
+<div class="meta">
+  <code>{{ plan.base }}...{{ plan.head }}</code>
+  {% if plan.head_sha %} · <code>{{ plan.head_sha[:12] }}</code>{% endif %}
+  · {% if plan.claims %}claims from <code>{{ plan.description or "description" }}</code>
+  ({{ plan.claims.model or "heuristic parser, low confidence" }}){% else %}no description{% endif %}
+</div>
+
+{% set s = plan.summary %}
+<div class="stats">
+  <div class="stat"><b>{{ s.read_units }}</b> to read carefully</div>
+  <div class="stat"><b>{{ s.read_lines }} / {{ s.lines_changed }}</b> changed lines to read</div>
+  <div class="stat"><b>{{ plan.unmentioned|length + plan.file_violations|length }}</b> unmentioned changes</div>
+  <div class="stat"><b>{{ plan.skim|length }}</b> to skim</div>
+  <div class="stat"><b>{{ s.files_skipped }}</b> files skipped</div>
+</div>
+
+{% if plan.unmentioned or plan.file_violations %}
+<div class="banner"><b>Heads up:</b> {{ plan.unmentioned|length + plan.file_violations|length }}
+  change(s) are not mentioned in the description, or contradict it.</div>
+{% endif %}
+
+<h2>Read carefully</h2>
+{% if plan.read_carefully %}
+<ol class="plan">
+{% for item in plan.read_carefully %}
+  <li>
+    <b>#{{ item.rank }}</b>
+    <span class="badge {{ item.level.value }}">{{ item.priority }} {{ item.level.value }}</span>
+    <a href="#u-{{ loop.index }}"><code>{{ item.unit.path }}</code> · <b><code>{{ item.unit.name }}</code></b></a>
+    <span class="muted mono">L{{ line_range(item) }} · +{{ item.unit.added }} −{{ item.unit.removed }}</span>
+    <ul class="reasons">
+    {% for r in item.scope_reasons %}<li class="scope">{{ r }}</li>{% endfor %}
+    {% for r in item.risk.reasons if r.points > 0 %}<li>{{ r.message }}</li>{% endfor %}
+    </ul>
+  </li>
+{% endfor %}
+</ol>
+{% else %}
+<p class="muted">Nothing stands out: no change reaches medium priority. Skim everything.</p>
+{% endif %}
+
+{% if plan.unmentioned or plan.file_violations %}
+<h2>Unmentioned changes</h2>
+<ul>
+{% for item in plan.unmentioned %}
+  <li><code>{{ item.unit.path }}</code> · <code>{{ item.unit.name }}</code>
+    <span class="muted">L{{ line_range(item) }}</span>: {{ item.scope_reasons|join("; ") }}</li>
+{% endfor %}
+{% for v in plan.file_violations %}
+  <li><code>{{ v.path }}</code>: out of scope: the description says “{{ v.item }}”</li>
+{% endfor %}
+</ul>
+{% endif %}
+
+{% if plan.scope and plan.scope.claimed_but_missing %}
+<h2>Claimed but not changed</h2>
+<ul>
+{% for m in plan.scope.claimed_but_missing %}<li>{{ m.kind }} <code>{{ m.claim }}</code></li>{% endfor %}
+</ul>
+{% endif %}
+
+{% if plan.notes %}
+<h2>Notes</h2>
+<ul>{% for n in plan.notes %}<li>{{ n }}</li>{% endfor %}</ul>
+{% endif %}
+
+<h2>Changes</h2>
+{% set anchors = {} %}
+{% for item in plan.read_carefully %}{% set _ = anchors.update({item.unit_id: loop.index}) %}{% endfor %}
+{% for f in files %}
+<details class="file"{% if f.flagged %} open{% endif %}>
+  <summary><code>{% if f.old_path %}{{ f.old_path }} → {% endif %}{{ f.path }}</code>
+    <span class="muted">({{ f.status }})</span>
+    {% for item in f.items if item.rank or item.is_unmentioned %}
+      <span class="badge {{ item.level.value }}">{{ item.unit.name }}</span>
+    {% endfor %}
+  </summary>
+  <div class="diff-wrap">
+  <table class="diff mono">
+  {% for row in f.rows %}
+    {% if row.kind == "hunk" or row.kind == "truncated" %}
+    <tr class="hunk"><td class="ln"></td><td class="ln"></td><td class="code">{{ row.text }}</td></tr>
+    {% elif row.kind == "note" %}
+    {% set item = row.item %}
+    <tr class="note {{ row.level }}"{% if item.unit_id in anchors %} id="u-{{ anchors[item.unit_id] }}"{% endif %}>
+      <td colspan="3">
+        {% if item.rank %}<b>#{{ item.rank }}</b> {% endif %}
+        <span class="badge {{ item.level.value }}">{{ item.priority }} {{ item.level.value }}</span>
+        <b><code>{{ item.unit.name }}</code></b> <span class="muted">L{{ line_range(item) }}</span>
+        <ul class="reasons">
+        {% for r in item.scope_reasons %}<li class="scope">{{ r }}</li>{% endfor %}
+        {% for r in item.risk.reasons if r.points > 0 %}<li>{{ r.message }}</li>{% endfor %}
+        </ul>
+      </td>
+    </tr>
+    {% else %}
+    <tr class="{{ row.kind }}{% if row.level %} flag-{{ row.level }}{% endif %}">
+      <td class="ln">{{ row.old or "" }}</td><td class="ln">{{ row.new or "" }}</td>
+      <td class="code">{{ "+" if row.kind == "added" else ("-" if row.kind == "removed" else " ") }}{{ row.text }}</td>
+    </tr>
+    {% endif %}
+  {% endfor %}
+  </table>
+  </div>
+</details>
+{% endfor %}
+
+{% if skipped %}
+<p class="muted">Skipped: {% for f in skipped %}<code>{{ f.path }}</code>
+  ({{ "binary" if f.is_binary else (f.generated_reason or "ignored by " ~ f.ignored_by) }}){{ ", " if not loop.last }}{% endfor %}</p>
+{% endif %}
+
+<footer>Review Map {{ version }} · a reading plan, not a review. The description is treated as
+  untrusted input and checked against the diff.</footer>
+</main>
+</body>
+</html>

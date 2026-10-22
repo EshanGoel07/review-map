@@ -1,0 +1,166 @@
+{
+  "schema_version": 1,
+  "tool": {
+    "name": "review-map",
+    "version": "0.0.0-test"
+  },
+  "change": {
+    "base": "main",
+    "head": "feature",
+    "base_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "summary": {
+    "files_changed": 4,
+    "files_skipped": 1,
+    "units_changed": 2,
+    "lines_changed": 7,
+    "budget_lines": 40,
+    "max_units": 5,
+    "read_units": 1,
+    "read_lines": 2,
+    "highest_level": "high",
+    "unmentioned": 2,
+    "claimed_but_missing": 1
+  },
+  "claims": {
+    "description": "changes.md",
+    "source": "llm",
+    "model": "groq/openai/gpt-oss-120b",
+    "low_confidence": false,
+    "files": [
+      "notes/api.py",
+      "tests/test_api.py"
+    ],
+    "functions": [
+      "list_notes"
+    ],
+    "behaviors": [
+      "paginate the notes list"
+    ],
+    "out_of_scope": [
+      "notes/permissions.py",
+      "billing/",
+      "the login page"
+    ]
+  },
+  "items": [
+    {
+      "unit_id": "notes/permissions.py::can_delete",
+      "path": "notes/permissions.py",
+      "old_path": null,
+      "name": "can_delete",
+      "kind": "function",
+      "lines": {
+        "start": 8,
+        "end": 11,
+        "old_start": 8,
+        "old_end": 11
+      },
+      "added": 1,
+      "removed": 1,
+      "risk": {
+        "score": 65,
+        "level": "high",
+        "reasons": [
+          {
+            "rule": "permissions",
+            "points": 25,
+            "message": "permissions: permission, admin"
+          },
+          {
+            "rule": "security_check_changed",
+            "points": 20,
+            "message": "security check changed"
+          },
+          {
+            "rule": "condition_loosened",
+            "points": 15,
+            "message": "loosened condition (`or`/`||`)"
+          },
+          {
+            "rule": "no_tests",
+            "points": 5,
+            "message": "no tests changed"
+          }
+        ]
+      },
+      "scope": {
+        "level": "none",
+        "reasons": [
+          "out of scope: the description says \"notes/permissions.py\""
+        ],
+        "out_of_scope": [
+          "notes/permissions.py"
+        ]
+      },
+      "boost": 30,
+      "priority": 95,
+      "level": "high",
+      "section": "read_carefully",
+      "rank": 1,
+      "unmentioned": true
+    },
+    {
+      "unit_id": "notes/api.py::list_notes",
+      "path": "notes/api.py",
+      "old_path": null,
+      "name": "list_notes",
+      "kind": "function",
+      "lines": {
+        "start": 4,
+        "end": 7,
+        "old_start": 4,
+        "old_end": 6
+      },
+      "added": 3,
+      "removed": 2,
+      "risk": {
+        "score": 15,
+        "level": "low",
+        "reasons": [
+          {
+            "rule": "condition_changed",
+            "points": 10,
+            "message": "changed condition/return"
+          },
+          {
+            "rule": "no_tests",
+            "points": 5,
+            "message": "no tests changed"
+          }
+        ]
+      },
+      "scope": {
+        "level": "function",
+        "reasons": [],
+        "out_of_scope": []
+      },
+      "boost": 0,
+      "priority": 15,
+      "level": "low",
+      "section": "skim",
+      "rank": null,
+      "unmentioned": false
+    }
+  ],
+  "file_violations": [
+    {
+      "path": "billing/new.py",
+      "item": "billing/"
+    }
+  ],
+  "claimed_but_missing": [
+    {
+      "kind": "file",
+      "claim": "tests/test_api.py"
+    }
+  ],
+  "not_checkable": [
+    "the login page"
+  ],
+  "skipped_files": [
+    "poetry.lock"
+  ],
+  "notes": []
+}
