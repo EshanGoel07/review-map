@@ -653,7 +653,17 @@
     the plan inside `::stop-commands::`, a 1.6 KB job summary, `::error::` gate annotation,
     exit 1.
   - `action.yml`'s exact install commands in a clean venv → `review-map action` runs.
-- Not tested yet: a real run on GitHub (hand-off below).
+- **Real GitHub test** (2026-10-23) on `EshanGoel07/review-map-test` (public during the test,
+  made private afterwards), PR #1: "Paginate the notes list". The description says
+  permissions are unchanged; the branch quietly adds `or user.is_admin or note.shared` to
+  `can_delete`. Heuristic mode (no LLM secret).
+  1. Opened → run 39970517728, job 21 s → **one comment created** by `github-actions[bot]`:
+     `can_delete` #1 at 80 high ("out of scope", permissions, loosened condition, no tests
+     changed). The note says to add a GROQ_API_KEY repository secret (not `.env`).
+  2. New commit (a test file) → run 39970652141 → **same comment updated** (id 6367331148);
+     still one comment.
+  3. Description edited to mention the test → run 39970755930 → same comment updated;
+     unmentioned changes 3 → 1 (only `can_delete` left).
 
 **Known limitations**
 - The action reinstalls Review Map on each run (about 20-30 s); no pip cache yet.
