@@ -462,3 +462,106 @@
 - Every output is an attack surface when its input is untrusted: escape for the format
   you're writing (HTML, Markdown), and test it with hostile input.
 - Snapshot tests freeze an output format; regenerating them is a deliberate, reviewed act.
+
+## Phase 7 — Analyze real public GitHub PRs
+
+**Built**
+- `github/client.py`: a small `GitHubClient` (on `httpx2`) for JSON reads. It sends
+  `GITHUB_TOKEN` as a Bearer token if set and follows redirects (renamed repos answer 301).
+  Every expected failure becomes a `GitHubError` with a hint:
+  - 404: not found, or private (a different hint with and without a token)
+  - 401: bad token
+  - rate limit (`X-RateLimit-Remaining: 0`, 429, `Retry-After`, or a "rate limit" message),
+    with the local reset time
+  - other 403, 5xx, timeouts, network errors, unreadable JSON
+- `diff/github_pr.py`:
+  - `parse_pr_ref()`: `owner/repo#N` or a `github.com/.../pull/N` URL. Names are validated
+    (no `..`), so they are safe to use as folder names.
+  - `fetch_pr()` → `PullRequest`: title, body, base/head SHAs, head label, merged/draft
+    status, fork flag. `description` is title + body, or None when the body is empty
+    (a title alone is too thin to verify against).
+  - `ensure_pr_commits()`: one bare partial clone per repo (`--filter=blob:none`) in
+    `$REVIEW_MAP_REPO_CACHE_DIR` (default `~/.cache/review-map/repos`). Commits are fetched
+    by SHA, and only if missing, so a re-run needs no git network access. File contents
+    arrive on demand inside the usual `git diff` / `git cat-file` calls.
+  - `git_auth()`: for private repos, the token reaches git through `GIT_CONFIG_*` env vars
+    (an extraheader scoped to github.com), never through argv or the disk.
+    `GIT_TERMINAL_PROMPT=0` so git never hangs on a password prompt.
+  - `load_pr_config()`: `--config`, else `.reviewmap.yml` from the PR's **base** commit,
+    else defaults. Never the head: a PR could otherwise add ignore rules that hide its own
+    changes.
+- CLI `review-map pr PR [--format text|md|json|html] [--out] [--fail-on] [--config]
+  [--cache-dir] [--no-llm] [--no-cache]`. The header shows status, fork, base...head,
+  URL, fetched/cached and the config source. An empty PR description skips the scope check
+  with its own note.
+- `analyze` refactored: `_plan_for()` (score → claims → verify → plan), `_emit()` (render)
+  and `_finish()` (notes + gate) are shared with `pr`. `build_plan()` takes a custom
+  missing-description note.
+- Onboarding hints (no keys needed at install; the tool works without them):
+  `token_hint()` in `github/client.py`, a one-line hint in the style of Phase 4's
+  `setup_hint()`. Shown only when a token would help:
+  - rate limit without a token: 60 → 5,000 requests an hour, plus the token-creation link
+  - 404, or git unable to read the repo: the private-repo version, with the permissions
+    needed (read-only Contents and Pull requests)
+  `.env.example` explains when the token matters and how to create one. The token value is
+  never printed.
+- Skim-list fix (pending from Phase 6): module-level units show their file
+  (`changes.md`) instead of a bare `<module>` in the terminal "Safe to skim" list. The
+  Markdown list already showed the path.
+
+**Files**
+`src/review_map/github/client.py`, `src/review_map/diff/github_pr.py`, `src/review_map/cli.py`,
+`src/review_map/report/plan.py`, `tests/test_github_pr.py`, `tests/conftest.py`,
+`.env.example`, `CHANGELOG.md`.
+
+**Tested**
+- `test_github_pr.py` (77). The API is mocked with `httpx2.MockTransport`; the "GitHub
+  remote" is a local repo with `refs/pull/7/head`. Covers:
+  - ref parsing: valid forms, plus 12 bad ones including path tricks
+  - normal PR, token header, empty/null/blank description, fork / same repo / deleted fork,
+    status, missing fields
+  - 404 with and without a token (private repo), 401, rate limits (4 variants), plain 403,
+    502, connect error, timeout, bad JSON, the 301 redirect
+  - clone cache: first fetch, cached re-run, incremental fetch, missing commit,
+    unreachable remote, broken cache folder, git error messages
+  - token-only-in-env (existing `GIT_CONFIG_*` kept and restored)
+  - config read from base, not from a head that tries to ignore everything
+  - CLI: text/json/md/html, cached second run, empty description, 404, private repo,
+    rate limit, token from env, bad ref, gate, `--cache-dir`, help
+  - onboarding hints (one line, link, `.env.example`), including git's private-repo error
+  - the token is never echoed: success, 401, 404, rate limit, 403 and a git fetch failure,
+    in text and JSON output
+  - the skim label
+- Found and fixed a real bug: in a partial clone, `cat-file -e` on a missing commit
+  quietly fetches that one object. The "already have it?" check lied, and history would
+  then arrive one commit at a time. `GIT_NO_LAZY_FETCH=1` on that check (git 2.44+).
+- `conftest.py`: tests never see `GITHUB_TOKEN` and use a temp repo cache.
+- `pytest -q` → 519 passed. `ruff check .` → all passed. `ruff format --check .` → clean.
+- Demo (real GitHub, `--no-llm`, no token):
+  - `review-map pr psf/requests#6963` (CVE-2024-47081 netrc fix) → `get_netrc_auth` #1
+    (auth). First run 5 s, clone 3.8 MB; re-run 1.7 s, "commits cached".
+  - `#6767` (revert SSLContext caching) → `_urllib3_request_context` and
+    `HTTPAdapter.cert_verify` (ssl/cert, loosened condition, no tests changed).
+  - `#6966` (release bump, empty description) → "no description" note, nothing stands out.
+  - `#999999` → friendly 404, exit 2; `psf/requests` → bad-ref message, exit 2.
+  - `octocat/this-repo-does-not-exist#1` → 404 with the private-repo token hint and link;
+    the rate-limit hint shown with a mocked 403 (the real limit can't be hit on demand).
+
+**Known limitations**
+- `httpx2` is used through the SDKs' dependency but is not yet listed in `pyproject.toml`
+  (adding it was held for approval).
+- The heuristic parser reads backticked words like `netloc` as function names, so they show
+  as "claimed but not changed". The LLM parser avoids most of this.
+- PR comments and review threads are not read; only the title and body.
+- With git older than 2.44, `GIT_NO_LAZY_FETCH` is ignored: still correct, but the first
+  run on a new PR can be slow.
+- The cache is never pruned; delete `~/.cache/review-map/repos/<repo>.git` to reclaim space.
+
+**What I should understand from this phase**
+- An API gives metadata; a partial clone gives the code. Fetching only what you need
+  (commits now, file contents on demand) keeps a big repo cheap.
+- Decide which inputs are trusted: config from the base branch (already reviewed), never
+  from the PR under review.
+- Mock at the boundary (HTTP transport, git remote) so tests cover the real logic,
+  offline and fast.
+- Error messages are part of the product: each failure says what happened and what to do.

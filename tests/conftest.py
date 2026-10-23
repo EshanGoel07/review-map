@@ -46,6 +46,13 @@ def _no_real_llm(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempP
 
 
 @pytest.fixture(autouse=True)
+def _no_real_github(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory):
+    """Tests never see the developer's GitHub token or touch the real repo cache."""
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setenv("REVIEW_MAP_REPO_CACHE_DIR", str(tmp_path_factory.mktemp("repo-cache")))
+
+
+@pytest.fixture(autouse=True)
 def _no_network(monkeypatch: pytest.MonkeyPatch):
     """Fail loudly if any test opens a network connection (git subprocesses are unaffected)."""
     real_connect = socket.socket.connect

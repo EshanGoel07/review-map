@@ -2,7 +2,7 @@
 
 import io
 import json
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import StrEnum
@@ -20,19 +20,37 @@ from review_map.claims.parser import parse_claims
 from review_map.code.functions import collect_units
 from review_map.config import LoadedConfig, load_config
 from review_map.diff import git_source
+from review_map.diff.github_pr import (
+    PullRequest,
+    default_repo_cache_dir,
+    ensure_pr_commits,
+    fetch_pr,
+    git_auth,
+    load_pr_config,
+    parse_pr_ref,
+)
 from review_map.diff.parser import parse_diff
 from review_map.errors import EXIT_GATE_FAILED, ReviewMapError
+from review_map.github.client import GitHubClient, token_from_env
 from review_map.models import (
     ChangedFile,
     ChangedUnit,
     ClaimedScope,
     FileStatus,
     MatchLevel,
+    PlanItem,
     ReadingPlan,
     RiskLevel,
     ScopeReport,
+    UnitKind,
 )
-from review_map.report.plan import all_reasons, build_plan, gate_failed, line_range
+from review_map.report.plan import (
+    NO_DESCRIPTION_NOTE,
+    all_reasons,
+    build_plan,
+    gate_failed,
+    line_range,
+)
 from review_map.report.render_html import render_html
 from review_map.report.render_json import render_json
 from review_map.report.render_md import render_markdown
@@ -534,6 +552,13 @@ class FailOn(StrEnum):
 DEFAULT_HTML_OUT = Path("report.html")
 
 
+def _skim_label(item: PlanItem) -> str:
+    """A unit's name, or its file for module-level code (a bare `<module>` says nothing)."""
+    if item.unit.kind is UnitKind.MODULE:
+        return item.unit.path
+    return item.unit.name
+
+
 def _print_plan(plan: ReadingPlan, con: Console) -> None:
     s = plan.summary
     read = plan.read_carefully
@@ -582,7 +607,7 @@ def _print_plan(plan: ReadingPlan, con: Console) -> None:
 
     skim = plan.skim
     if skim:
-        names = ", ".join(escape(i.unit.name) for i in skim[:8])
+        names = ", ".join(escape(_skim_label(i)) for i in skim[:8])
         more = f" and {len(skim) - 8} more" if len(skim) > 8 else ""
         con.print(
             f"\n[bold]Safe to skim[/]: {_plural(len(skim), 'section')} [dim]({names}{more})[/]"
@@ -603,6 +628,121 @@ def _write(path: Path, content: str) -> None:
         ) from None
 
 
+@dataclass
+class PlanRun:
+    plan: ReadingPlan
+    claims: ClaimedScope | None
+    cached: bool
+
+
+def _plan_for(
+    change: LocalChange,
+    description: str | None,
+    label: str | None,
+    rel: str | None,
+    *,
+    no_llm: bool,
+    no_cache: bool,
+    missing_note: str = NO_DESCRIPTION_NOTE,
+) -> PlanRun:
+    """Score, check the description (if any) against the diff, and build the plan.
+
+    `label` names where the description came from; `rel` is its path in the repo,
+    if it is a file there, so the verifier doesn't count it as an unclaimed change.
+    """
+    changed = _collect(change)
+    scored = score_units(changed, change.files, change.loaded.config)
+    claims = scope = None
+    cached = False
+    if description is not None:
+        claims, cached = parse_claims(
+            description, change.loaded.config.llm, use_llm=not no_llm, use_cache=not no_cache
+        )
+        scope = verify_scope(claims, changed, change.files, rel)
+    plan = build_plan(
+        scored,
+        change.files,
+        change.loaded.config.reading_budget,
+        base=change.base,
+        head=change.head,
+        base_sha=change.merge_base,
+        head_sha=change.head_sha,
+        claims=claims,
+        scope=scope,
+        description=label,
+        missing_description_note=missing_note,
+    )
+    return PlanRun(plan, claims, cached)
+
+
+def _emit(
+    run: PlanRun,
+    change: LocalChange,
+    output_format: OutputFormat,
+    out: Path | None,
+    header: Callable[[], None],
+) -> None:
+    """Write the plan in the chosen format. Text gets `header` and the claims line first."""
+    plan = run.plan
+    if output_format is OutputFormat.TEXT:
+        con = Console(file=io.StringIO(), record=True, width=120) if out else console
+        header()  # header always goes to the terminal
+        if run.claims is not None:
+            source = run.claims.model or "heuristic parser"
+            confidence = " · [yellow]low confidence[/]" if run.claims.low_confidence else ""
+            console.print(
+                f"[dim]Claims from {escape(plan.description or '')} ({escape(source)}"
+                f"{', cached' if run.cached else ''})[/]{confidence}"
+            )
+        _print_plan(plan, con)
+        if out:
+            _write(out, con.export_text())
+            console.print(f"Wrote {escape(str(out))}")
+        return
+    rendered = {
+        OutputFormat.MD: lambda: render_markdown(plan),
+        OutputFormat.JSON: lambda: render_json(plan),
+        OutputFormat.HTML: lambda: render_html(plan, change.files),
+    }[output_format]()
+    target = out or (DEFAULT_HTML_OUT if output_format is OutputFormat.HTML else None)
+    if target is None:
+        typer.echo(rendered, nl=False)
+    else:
+        _write(target, rendered)
+        err_console.print(f"Wrote {escape(str(target))}")
+
+
+def _finish(plan: ReadingPlan, output_format: OutputFormat, fail_on: FailOn | None) -> None:
+    """Print notes (text format) and apply the `--fail-on` gate."""
+    if output_format is OutputFormat.TEXT:
+        for note in plan.notes:
+            err_console.print(f"\n[yellow]Note:[/] {escape(note)}")
+
+    failing = gate_failed(plan, fail_on.value if fail_on else None)
+    if failing:
+        err_console.print(
+            f"[bold red]Gate failed[/] (--fail-on {fail_on.value}): "
+            f"{_plural(len(failing), 'section')} at {fail_on.value} priority or above."
+        )
+        raise typer.Exit(EXIT_GATE_FAILED)
+
+
+FormatOption = Annotated[OutputFormat, typer.Option("--format", "-f", help="Output format.")]
+OutOption = Annotated[
+    Path | None,
+    typer.Option(
+        "--out", "-o", help="Write to this file. Default: the terminal (html: report.html)."
+    ),
+]
+FailOnOption = Annotated[
+    FailOn | None,
+    typer.Option(
+        "--fail-on",
+        help="Exit with code 1 if any change reaches this priority (for CI gates).",
+    ),
+]
+
+
 @app.command()
 def analyze(
     repo: RepoOption = Path("."),
@@ -617,22 +757,9 @@ def analyze(
             "if any; without one the scope check is skipped.",
         ),
     ] = None,
-    output_format: Annotated[
-        OutputFormat, typer.Option("--format", "-f", help="Output format.")
-    ] = OutputFormat.TEXT,
-    out: Annotated[
-        Path | None,
-        typer.Option(
-            "--out", "-o", help="Write to this file. Default: the terminal (html: report.html)."
-        ),
-    ] = None,
-    fail_on: Annotated[
-        FailOn | None,
-        typer.Option(
-            "--fail-on",
-            help="Exit with code 1 if any change reaches this priority (for CI gates).",
-        ),
-    ] = None,
+    output_format: FormatOption = OutputFormat.TEXT,
+    out: OutOption = None,
+    fail_on: FailOnOption = None,
     config: ConfigOption = None,
     no_llm: NoLLMOption = False,
     no_cache: NoCacheOption = False,
@@ -644,75 +771,106 @@ def analyze(
     """
     with friendly_errors():
         change = _load_local(repo, base, head, config)
-        changed = _collect(change)
-        scored = score_units(changed, change.files, change.loaded.config)
-
-        claims = scope = None
-        description = None
-        cached = False
+        text = label = rel = None
         if desc is not None or (change.root / DEFAULT_DESC).is_file():
             desc = _resolve_desc(desc, change.root)
             rel = _repo_relative(desc, change.root)
-            description = "stdin" if str(desc) == "-" else (rel or str(desc))
-            claims, cached = parse_claims(
-                _read_description(desc),
-                change.loaded.config.llm,
-                use_llm=not no_llm,
-                use_cache=not no_cache,
+            label = "stdin" if str(desc) == "-" else (rel or str(desc))
+            text = _read_description(desc)
+        run = _plan_for(change, text, label, rel, no_llm=no_llm, no_cache=no_cache)
+        _emit(run, change, output_format, out, lambda: _print_header("Review Map", change))
+    _finish(run.plan, output_format, fail_on)
+
+
+PR_DESCRIPTION = "PR description"
+PR_NO_DESCRIPTION_NOTE = (
+    "This PR has no description, so the scope check was skipped. "
+    "Only the risk score ranks the changes."
+)
+
+
+def _print_pr_header(pr: PullRequest, change: LocalChange, fetched: bool) -> None:
+    loaded = change.loaded
+    source = str(loaded.source) + " from base" if loaded.source else "defaults"
+    fork = " · from a fork" if pr.from_fork else ""
+    git = "fetched" if fetched else "cached"
+    console.print(
+        f"[bold]Review Map[/] {escape(pr.ref)} [dim]({escape(pr.status)}{fork})[/]: "
+        f"{escape(pr.title)}"
+    )
+    console.print(
+        f"[dim]{escape(change.base)}...{escape(change.head)} · {escape(pr.html_url)} · "
+        f"commits {git} · config: {escape(source)}[/]"
+    )
+
+
+@app.command("pr")
+def pull_request(
+    ref: Annotated[
+        str,
+        typer.Argument(
+            metavar="PR",
+            help="owner/repo#123 or https://github.com/owner/repo/pull/123",
+            show_default=False,
+        ),
+    ],
+    output_format: FormatOption = OutputFormat.TEXT,
+    out: OutOption = None,
+    fail_on: FailOnOption = None,
+    config: Annotated[
+        Path | None,
+        typer.Option(
+            "--config",
+            help="Config file. Default: .reviewmap.yml from the PR's base commit, if any.",
+        ),
+    ] = None,
+    cache_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--cache-dir",
+            help="Where repo clones are kept. Default: $REVIEW_MAP_REPO_CACHE_DIR, "
+            "else ~/.cache/review-map/repos.",
+            show_default=False,
+        ),
+    ] = None,
+    no_llm: NoLLMOption = False,
+    no_cache: NoCacheOption = False,
+) -> None:
+    """Build the reading plan for a GitHub pull request.
+
+    Reads the PR's title, description and commits from GitHub (GITHUB_TOKEN is
+    optional for public repos), keeps a partial clone in a cache folder, and runs
+    the same analysis as `analyze`. The PR description is treated as untrusted data.
+    """
+    with friendly_errors():
+        pr_ref = parse_pr_ref(ref)
+        token = token_from_env()
+        with GitHubClient(token) as client:
+            pr = fetch_pr(client, pr_ref)
+        with git_auth(token):
+            clone, fetched = ensure_pr_commits(pr, cache_dir or default_repo_cache_dir())
+            loaded = load_pr_config(clone, pr.base_sha, config)
+            files = parse_diff(git_source.get_diff(clone, pr.base_sha, pr.head_sha), loaded.config)
+            change = LocalChange(
+                root=clone,
+                base=pr.base_ref,
+                head=pr.head_label,
+                merge_base=git_source.merge_base(clone, pr.base_sha, pr.head_sha),
+                head_sha=pr.head_sha,
+                loaded=loaded,
+                files=files,
             )
-            scope = verify_scope(claims, changed, change.files, rel)
-
-        plan = build_plan(
-            scored,
-            change.files,
-            change.loaded.config.reading_budget,
-            base=change.base,
-            head=change.head,
-            base_sha=change.merge_base,
-            head_sha=change.head_sha,
-            claims=claims,
-            scope=scope,
-            description=description,
-        )
-
-        if output_format is OutputFormat.TEXT:
-            con = Console(file=io.StringIO(), record=True, width=120) if out else console
-            _print_header("Review Map", change)  # header always goes to the terminal
-            if claims is not None:
-                source = claims.model or "heuristic parser"
-                confidence = " · [yellow]low confidence[/]" if claims.low_confidence else ""
-                console.print(
-                    f"[dim]Claims from {escape(description or '')} ({escape(source)}"
-                    f"{', cached' if cached else ''})[/]{confidence}"
-                )
-            _print_plan(plan, con)
-            if out:
-                _write(out, con.export_text())
-                console.print(f"Wrote {escape(str(out))}")
-        else:
-            rendered = {
-                OutputFormat.MD: lambda: render_markdown(plan),
-                OutputFormat.JSON: lambda: render_json(plan),
-                OutputFormat.HTML: lambda: render_html(plan, change.files),
-            }[output_format]()
-            target = out or (DEFAULT_HTML_OUT if output_format is OutputFormat.HTML else None)
-            if target is None:
-                typer.echo(rendered, nl=False)
-            else:
-                _write(target, rendered)
-                err_console.print(f"Wrote {escape(str(target))}")
-
-    if output_format is OutputFormat.TEXT:
-        for note in plan.notes:
-            err_console.print(f"\n[yellow]Note:[/] {escape(note)}")
-
-    failing = gate_failed(plan, fail_on.value if fail_on else None)
-    if failing:
-        err_console.print(
-            f"[bold red]Gate failed[/] (--fail-on {fail_on.value}): "
-            f"{_plural(len(failing), 'section')} at {fail_on.value} priority or above."
-        )
-        raise typer.Exit(EXIT_GATE_FAILED)
+            run = _plan_for(
+                change,
+                pr.description,
+                PR_DESCRIPTION,
+                None,
+                no_llm=no_llm,
+                no_cache=no_cache,
+                missing_note=PR_NO_DESCRIPTION_NOTE,
+            )
+        _emit(run, change, output_format, out, lambda: _print_pr_header(pr, change, fetched))
+    _finish(run.plan, output_format, fail_on)
 
 
 if __name__ == "__main__":

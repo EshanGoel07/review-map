@@ -65,6 +65,12 @@ def _scope_for(
     return level, reasons, violated, boost
 
 
+NO_DESCRIPTION_NOTE = (
+    "No description given, so the scope check was skipped. "
+    "Pass --desc FILE or add changes.md to also find unmentioned changes."
+)
+
+
 def build_plan(
     scored: list[ScoredUnit],
     files: list[ChangedFile],
@@ -77,6 +83,7 @@ def build_plan(
     claims: ClaimedScope | None = None,
     scope: ScopeReport | None = None,
     description: str | None = None,
+    missing_description_note: str = NO_DESCRIPTION_NOTE,
 ) -> ReadingPlan:
     notes: list[str] = []
     if claims is not None:
@@ -84,10 +91,7 @@ def build_plan(
     if scope is not None:
         notes += scope.notes
     else:
-        notes.append(
-            "No description given, so the scope check was skipped. "
-            "Pass --desc FILE or add changes.md to also find unmentioned changes."
-        )
+        notes.append(missing_description_note)
     low_confidence = bool(scope and scope.low_confidence)
     if low_confidence:
         notes.append("Scope boosts are halved because the claims are low confidence.")
