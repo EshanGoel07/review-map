@@ -2,9 +2,9 @@
 
 import io
 import json
+import sys
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated
@@ -16,9 +16,9 @@ from rich.markup import escape
 from rich.table import Table
 
 from review_map import __version__
+from review_map.claims.llm import in_github_actions
 from review_map.claims.parser import parse_claims
-from review_map.code.functions import collect_units
-from review_map.config import LoadedConfig, load_config
+from review_map.config import load_config
 from review_map.diff import git_source
 from review_map.diff.github_pr import (
     PullRequest,
@@ -31,6 +31,7 @@ from review_map.diff.github_pr import (
 )
 from review_map.diff.parser import parse_diff
 from review_map.errors import EXIT_GATE_FAILED, ReviewMapError
+from review_map.github import action
 from review_map.github.client import GitHubClient, token_from_env
 from review_map.models import (
     ChangedFile,
@@ -44,10 +45,17 @@ from review_map.models import (
     ScopeReport,
     UnitKind,
 )
+from review_map.pipeline import (
+    PR_DESCRIPTION,
+    PR_NO_DESCRIPTION_NOTE,
+    LocalChange,
+    PlanRun,
+    collect,
+    plan_for,
+    pr_change,
+)
 from review_map.report.plan import (
-    NO_DESCRIPTION_NOTE,
     all_reasons,
-    build_plan,
     gate_failed,
     line_range,
 )
@@ -94,6 +102,9 @@ def friendly_errors() -> Iterator[None]:
         err_console.print(f"[bold red]Error:[/] {escape(exc.message)}")
         if exc.hint:
             err_console.print(f"[dim]Hint:[/] {escape(exc.hint)}")
+        if in_github_actions():  # also show it on the run's summary page
+            hint = f" {exc.hint}" if exc.hint else ""
+            action.annotate("error", exc.message + hint, sys.stderr)
         raise typer.Exit(exc.exit_code) from None
 
 
@@ -109,24 +120,17 @@ def load_env_file() -> None:
 @app.callback()
 def main() -> None:
     """Review Map: get a short reading plan for a pull request."""
-    load_env_file()
+    # Inside GitHub Actions the working tree is the PR's own code: a `.env` there could
+    # point the LLM at another server and receive the repo's API key. Settings come
+    # only from the workflow there.
+    if not in_github_actions():
+        load_env_file()
 
 
 @app.command()
 def version() -> None:
     """Show the installed Review Map version."""
     console.print(f"review-map {__version__}")
-
-
-@dataclass
-class LocalChange:
-    root: Path
-    base: str
-    head: str
-    merge_base: str
-    head_sha: str
-    loaded: LoadedConfig
-    files: list[ChangedFile]
 
 
 def _load_local(repo: Path, base: str | None, head: str, config: Path | None) -> LocalChange:
@@ -142,14 +146,6 @@ def _load_local(repo: Path, base: str | None, head: str, config: Path | None) ->
         head_sha=git_source.resolve_ref(root, head),
         loaded=loaded,
         files=files,
-    )
-
-
-def _collect(change: LocalChange) -> list[ChangedUnit]:
-    return collect_units(
-        change.files,
-        read_old=lambda p: git_source.read_file(change.root, change.merge_base, p),
-        read_new=lambda p: git_source.read_file(change.root, change.head_sha, p),
     )
 
 
@@ -243,7 +239,7 @@ def units(
     """List the functions, classes and methods touched between BASE and HEAD."""
     with friendly_errors():
         change = _load_local(repo, base, head, config)
-        changed = _collect(change)
+        changed = collect(change)
     _print_header("Units", change)
     if not changed:
         console.print("No code changes to map.")
@@ -294,7 +290,7 @@ def score(
     """Rank changed units by rule-based risk score (0-100), with reasons."""
     with friendly_errors():
         change = _load_local(repo, base, head, config)
-        scored = score_units(_collect(change), change.files, change.loaded.config)
+        scored = score_units(collect(change), change.files, change.loaded.config)
     _print_header("Risk", change)
     if not scored:
         console.print("No code changes to score.")
@@ -507,7 +503,7 @@ def verify(
     """
     with friendly_errors():
         change = _load_local(repo, base, head, config)
-        changed = _collect(change)
+        changed = collect(change)
         desc = _resolve_desc(desc, change.root)
         scope, cached = parse_claims(
             _read_description(desc),
@@ -628,53 +624,6 @@ def _write(path: Path, content: str) -> None:
         ) from None
 
 
-@dataclass
-class PlanRun:
-    plan: ReadingPlan
-    claims: ClaimedScope | None
-    cached: bool
-
-
-def _plan_for(
-    change: LocalChange,
-    description: str | None,
-    label: str | None,
-    rel: str | None,
-    *,
-    no_llm: bool,
-    no_cache: bool,
-    missing_note: str = NO_DESCRIPTION_NOTE,
-) -> PlanRun:
-    """Score, check the description (if any) against the diff, and build the plan.
-
-    `label` names where the description came from; `rel` is its path in the repo,
-    if it is a file there, so the verifier doesn't count it as an unclaimed change.
-    """
-    changed = _collect(change)
-    scored = score_units(changed, change.files, change.loaded.config)
-    claims = scope = None
-    cached = False
-    if description is not None:
-        claims, cached = parse_claims(
-            description, change.loaded.config.llm, use_llm=not no_llm, use_cache=not no_cache
-        )
-        scope = verify_scope(claims, changed, change.files, rel)
-    plan = build_plan(
-        scored,
-        change.files,
-        change.loaded.config.reading_budget,
-        base=change.base,
-        head=change.head,
-        base_sha=change.merge_base,
-        head_sha=change.head_sha,
-        claims=claims,
-        scope=scope,
-        description=label,
-        missing_description_note=missing_note,
-    )
-    return PlanRun(plan, claims, cached)
-
-
 def _emit(
     run: PlanRun,
     change: LocalChange,
@@ -777,16 +726,9 @@ def analyze(
             rel = _repo_relative(desc, change.root)
             label = "stdin" if str(desc) == "-" else (rel or str(desc))
             text = _read_description(desc)
-        run = _plan_for(change, text, label, rel, no_llm=no_llm, no_cache=no_cache)
+        run = plan_for(change, text, label, rel, no_llm=no_llm, no_cache=no_cache)
         _emit(run, change, output_format, out, lambda: _print_header("Review Map", change))
     _finish(run.plan, output_format, fail_on)
-
-
-PR_DESCRIPTION = "PR description"
-PR_NO_DESCRIPTION_NOTE = (
-    "This PR has no description, so the scope check was skipped. "
-    "Only the risk score ranks the changes."
-)
 
 
 def _print_pr_header(pr: PullRequest, change: LocalChange, fetched: bool) -> None:
@@ -849,18 +791,8 @@ def pull_request(
             pr = fetch_pr(client, pr_ref)
         with git_auth(token):
             clone, fetched = ensure_pr_commits(pr, cache_dir or default_repo_cache_dir())
-            loaded = load_pr_config(clone, pr.base_sha, config)
-            files = parse_diff(git_source.get_diff(clone, pr.base_sha, pr.head_sha), loaded.config)
-            change = LocalChange(
-                root=clone,
-                base=pr.base_ref,
-                head=pr.head_label,
-                merge_base=git_source.merge_base(clone, pr.base_sha, pr.head_sha),
-                head_sha=pr.head_sha,
-                loaded=loaded,
-                files=files,
-            )
-            run = _plan_for(
+            change = pr_change(clone, pr, load_pr_config(clone, pr.base_sha, config))
+            run = plan_for(
                 change,
                 pr.description,
                 PR_DESCRIPTION,
@@ -871,6 +803,60 @@ def pull_request(
             )
         _emit(run, change, output_format, out, lambda: _print_pr_header(pr, change, fetched))
     _finish(run.plan, output_format, fail_on)
+
+
+@app.command("action")
+def github_action(
+    event: Annotated[
+        Path | None,
+        typer.Option(
+            "--event",
+            envvar="GITHUB_EVENT_PATH",
+            help="The pull_request event JSON. Default: $GITHUB_EVENT_PATH (set by Actions).",
+            show_default=False,
+        ),
+    ] = None,
+    repo: RepoOption = Path("."),
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Print the comment instead of posting it.")
+    ] = False,
+    fail_on: Annotated[
+        FailOn | None,
+        typer.Option(
+            "--fail-on",
+            envvar="REVIEW_MAP_FAIL_ON",
+            help="Exit with code 1 (after commenting) if any change reaches this priority.",
+        ),
+    ] = None,
+    budget: Annotated[
+        int | None,
+        typer.Option(
+            "--budget",
+            envvar="REVIEW_MAP_BUDGET",
+            min=1,
+            help="Max sections to read carefully. Default: .reviewmap.yml, else 5.",
+            show_default=False,
+        ),
+    ] = None,
+    no_llm: NoLLMOption = False,
+) -> None:
+    """Run as a GitHub Action: post or update one reading-plan comment on the PR.
+
+    Used by action.yml. Reads the PR from the event file and the code from the
+    checkout (which needs `fetch-depth: 0`). Also writes the plan to the job summary.
+    """
+    with friendly_errors():
+        code = action.run(
+            event=event,
+            repo=repo,
+            dry_run=dry_run,
+            fail_on=fail_on.value if fail_on else None,
+            budget=budget,
+            no_llm=no_llm,
+            out=sys.stdout,
+        )
+    if code:
+        raise typer.Exit(code)
 
 
 if __name__ == "__main__":

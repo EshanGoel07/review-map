@@ -99,7 +99,7 @@ class PullRequest(BaseModel):
         return f"{self.title}\n\n{self.body}"
 
 
-def _pr_from_api(ref: PRRef, data: Any) -> PullRequest:
+def pr_from_api(ref: PRRef, data: Any) -> PullRequest:
     try:
         base, head = data["base"], data["head"]
         base_repo = base["repo"]["full_name"]
@@ -126,7 +126,7 @@ def _pr_from_api(ref: PRRef, data: Any) -> PullRequest:
 
 def fetch_pr(client: GitHubClient, ref: PRRef) -> PullRequest:
     data = client.get_json(f"/repos/{ref.slug}/pulls/{ref.number}", what=f"pull request {ref}")
-    return _pr_from_api(ref, data)
+    return pr_from_api(ref, data)
 
 
 # --- Local clone cache ------------------------------------------------------------

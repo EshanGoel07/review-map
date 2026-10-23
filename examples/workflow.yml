@@ -1,0 +1,36 @@
+# Review Map: one reading-plan comment on every pull request.
+# Copy this file to .github/workflows/review-map.yml in your repo.
+#
+# Optional: add an LLM key as a repository secret (Settings → Secrets and variables →
+# Actions → New repository secret), e.g. GROQ_API_KEY (free at https://console.groq.com/keys).
+# Without one, Review Map still runs with a heuristic parser and says so in the comment.
+
+name: Review Map
+
+on:
+  pull_request: # not pull_request_target: that would hand secrets to fork PRs' code
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+  pull-requests: write # to post and update the comment
+
+# A newer push cancels the older run, so two runs never race to create two comments.
+concurrency:
+  group: review-map-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  reading-plan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # full history: the base, the head and their merge base
+          persist-credentials: false
+
+      - uses: EshanGoel07/review-map@main # pin a release tag (e.g. @v0.1.0) once there is one
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        with:
+          fail-on: "" # set to high to fail the check on high-priority changes

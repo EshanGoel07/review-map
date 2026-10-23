@@ -108,7 +108,7 @@ def resolve_llm(settings: LLMSettings, env: Mapping[str, str] | None = None) -> 
     if info.key_env and not api_key:
         raise LLMError(
             f"The LLM provider is {provider}, but {info.key_env} is not set.",
-            hint=f"Add {info.key_env}=... to .env (see .env.example).",
+            hint=key_hint(info.key_env),
         )
 
     # A model from the config file only applies to the provider it was written for.
@@ -118,7 +118,24 @@ def resolve_llm(settings: LLMSettings, env: Mapping[str, str] | None = None) -> 
     return ResolvedLLM(provider, model, api_key, base_url)
 
 
+def in_github_actions(env: Mapping[str, str] | None = None) -> bool:
+    env = os.environ if env is None else env
+    return env.get("GITHUB_ACTIONS") == "true"
+
+
+def key_hint(key_env: str) -> str:
+    """Where to put an API key: a repo secret inside GitHub Actions, else `.env`."""
+    if in_github_actions():
+        return (
+            f"Add a {key_env} repository secret and pass it to the action as an env var "
+            "(see examples/workflow.yml)."
+        )
+    return f"Add {key_env}=... to .env (see .env.example)."
+
+
 def setup_hint() -> str:
+    if in_github_actions():
+        return f"To enable the LLM parser: {key_hint('GROQ_API_KEY')}"
     return "Set GROQ_API_KEY in .env to enable the LLM parser (see .env.example)."
 
 

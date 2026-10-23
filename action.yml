@@ -1,0 +1,71 @@
+name: Review Map
+description: >-
+  Post one short reading plan on each pull request: what to read carefully, in which
+  order, and which changes the description didn't mention.
+author: Eshan Goel
+branding:
+  icon: map
+  color: blue
+
+inputs:
+  fail-on:
+    description: >-
+      Fail the check if any change reaches this priority: `high` or `medium`.
+      Empty (the default) never fails. The comment is posted either way.
+    required: false
+    default: ""
+  budget:
+    description: >-
+      Max number of sections to read carefully. Default: `reading_budget.max_units`
+      in .reviewmap.yml, else 5.
+    required: false
+    default: ""
+  provider:
+    description: >-
+      LLM provider for reading the PR description: groq, gemini, anthropic, openai or
+      ollama. Empty: the first one whose API key is set. No key: a heuristic parser.
+    required: false
+    default: ""
+  model:
+    description: LLM model name. Empty uses the provider's default.
+    required: false
+    default: ""
+  github-token:
+    description: "Token used to post the comment. Needs `pull-requests: write`."
+    required: false
+    default: ${{ github.token }}
+  python-version:
+    description: Python used to run Review Map (3.11 or newer).
+    required: false
+    default: "3.12"
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v6
+      id: python
+      with:
+        python-version: ${{ inputs.python-version }}
+        update-environment: false # don't change the Python of the caller's later steps
+
+    # Own virtualenv, so Review Map's dependencies never clash with the caller's.
+    - name: Install Review Map
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        PYTHON: ${{ steps.python.outputs.python-path }}
+      run: |
+        "$PYTHON" -m venv "$RUNNER_TEMP/review-map-venv"
+        "$RUNNER_TEMP/review-map-venv/bin/python" -m pip install \
+          --disable-pip-version-check --quiet "$ACTION_PATH"
+
+    # Inputs go through env vars, never pasted into the script: no shell injection.
+    - name: Reading plan
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        REVIEW_MAP_FAIL_ON: ${{ inputs.fail-on }}
+        REVIEW_MAP_BUDGET: ${{ inputs.budget }}
+        REVIEW_MAP_LLM_PROVIDER: ${{ inputs.provider }}
+        REVIEW_MAP_LLM_MODEL: ${{ inputs.model }}
+      run: '"$RUNNER_TEMP/review-map-venv/bin/review-map" action'

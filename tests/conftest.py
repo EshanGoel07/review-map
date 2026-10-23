@@ -49,6 +49,17 @@ def _no_real_llm(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempP
 def _no_real_github(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory):
     """Tests never see the developer's GitHub token or touch the real repo cache."""
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    # When the suite itself runs in GitHub Actions (CI), don't let the runner's
+    # variables leak into tests of the Action.
+    for var in (
+        "GITHUB_ACTIONS",
+        "GITHUB_EVENT_PATH",
+        "GITHUB_STEP_SUMMARY",
+        "GITHUB_API_URL",
+        "REVIEW_MAP_FAIL_ON",
+        "REVIEW_MAP_BUDGET",
+    ):
+        monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("REVIEW_MAP_REPO_CACHE_DIR", str(tmp_path_factory.mktemp("repo-cache")))
 
 

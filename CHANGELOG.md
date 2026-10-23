@@ -35,8 +35,14 @@ uses [Semantic Versioning](https://semver.org/).
   Clear messages for missing PRs, private repos, bad tokens and rate limits.
   No token is needed to start; when one would help (rate limit, private repo), a one-line
   hint says how to create it.
+- GitHub Action (`action.yml`, example in `examples/workflow.yml`): posts one reading-plan
+  comment per PR and updates it in place, writes the plan to the job summary, supports
+  `fail-on`, `budget`, `provider` and `model` inputs, and works without an LLM key and on
+  PRs from forks (summary only). `review-map action --dry-run` prints the comment.
 
 ### Changed
+- `.env` is no longer loaded inside GitHub Actions (the working tree is the PR's code);
+  LLM setup hints there point to repository secrets.
 - The terminal "Safe to skim" list shows the file name for module-level code instead of
   `<module>`.
 - `reading_budget.min_lines` config setting (default 40).

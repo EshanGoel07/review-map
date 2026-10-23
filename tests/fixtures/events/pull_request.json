@@ -1,0 +1,29 @@
+{
+  "action": "synchronize",
+  "number": 7,
+  "pull_request": {
+    "number": 7,
+    "title": "Fix pagination off-by-one",
+    "body": "BODY",
+    "state": "open",
+    "merged": false,
+    "merged_at": null,
+    "draft": false,
+    "html_url": "https://github.com/acme/shop/pull/7",
+    "user": {"login": "someone", "type": "User"},
+    "base": {
+      "label": "acme:main",
+      "ref": "main",
+      "sha": "BASE_SHA",
+      "repo": {"full_name": "acme/shop", "fork": false}
+    },
+    "head": {
+      "label": "acme:feature",
+      "ref": "feature",
+      "sha": "HEAD_SHA",
+      "repo": {"full_name": "acme/shop", "fork": false}
+    }
+  },
+  "repository": {"full_name": "acme/shop"},
+  "sender": {"login": "someone", "type": "User"}
+}

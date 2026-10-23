@@ -565,3 +565,123 @@
 - Mock at the boundary (HTTP transport, git remote) so tests cover the real logic,
   offline and fast.
 - Error messages are part of the product: each failure says what happened and what to do.
+
+## Phase 8 — GitHub Action
+
+**Built**
+- `action.yml` (repo root): a composite action.
+  - Sets up Python (without changing the caller's Python) and installs Review Map into its
+    own venv in `$RUNNER_TEMP`, then runs `review-map action`.
+  - Inputs: `fail-on`, `budget` (max sections to read carefully), `provider`, `model`,
+    `github-token` (default: the run's token), `python-version`.
+  - Inputs reach the script only through env vars, never `${{ }}` inside `run:`, so there
+    is no shell injection.
+- `github/action.py`:
+  - Reads the PR from the event file (`GITHUB_EVENT_PATH`) and the code from the
+    workflow's checkout. Config comes from the base commit. Missing commits get a
+    "use `fetch-depth: 0`" hint.
+  - **Single comment upsert**:
+    - Our comment = the `<!-- review-map -->` marker **and** written by us
+      (`github-actions[bot]`, or the token's login via `/user` for a personal token).
+      A marker pasted by someone else is ignored.
+    - Comments are listed across all pages. An identical body is left alone (no
+      notification noise).
+    - Comments are cut at a line break to fit GitHub's 65,536-character limit, with the
+      marker kept and `<details>` closed.
+  - The full plan always goes to the **job summary** too.
+  - **Forks**: no secrets, so the heuristic parser is used and the comment says why. If
+    the read-only token can't comment, there's a warning annotation, the plan stays in the
+    job summary, and the job does not fail.
+  - **Workflow-command safety**: anything derived from the PR is printed between
+    `::stop-commands::<random>` markers, so a title like `::set-env ...` is never run.
+    Annotations escape `%`, CR and LF.
+  - `--fail-on` exits 1 *after* the comment is posted, with an `::error::` annotation.
+- `github/client.py`: `post_json`, `patch_json`, `get_all` (follows `Link: rel="next"`,
+  only on the API host, max 30 pages), `login()`. A 403 on a write raises
+  `GitHubPermissionError`, with the hint to add `permissions: pull-requests: write`
+  (forks only get a read-only token). Supports `GITHUB_API_URL` (GitHub Enterprise).
+- `pipeline.py`: `LocalChange`, `pr_change()`, `collect()`, `plan_for()` moved out of
+  `cli.py`, shared by `analyze`, `pr` and the action.
+- CLI `review-map action [--event FILE] [--repo] [--dry-run] [--fail-on] [--budget]
+  [--no-llm]`. `--fail-on` and `--budget` also read `REVIEW_MAP_FAIL_ON` and
+  `REVIEW_MAP_BUDGET`; empty means default.
+  - Inside Actions, every expected error is also an `::error::` annotation.
+  - **`.env` is not loaded inside Actions**: the working tree is the PR's code, and a PR's
+    `.env` could point `REVIEW_MAP_LLM_BASE_URL` at another server and receive the API key.
+  - LLM hints are Actions-aware ("add a repository secret" instead of "add it to .env").
+- `examples/workflow.yml`:
+  - `pull_request` (opened, synchronize, reopened, edited), **not** `pull_request_target`
+  - `permissions: contents: read, pull-requests: write`
+  - a `concurrency` group so two runs can't race and create two comments
+  - checkout with `fetch-depth: 0` and `persist-credentials: false`
+  - `GROQ_API_KEY` from secrets
+
+**Files**
+`action.yml`, `examples/workflow.yml`, `src/review_map/github/{action,client}.py`,
+`src/review_map/pipeline.py`, `src/review_map/cli.py`, `src/review_map/claims/llm.py`,
+`src/review_map/diff/github_pr.py`, `tests/test_action.py`,
+`tests/fixtures/events/pull_request.json`, `tests/conftest.py`, `CHANGELOG.md`.
+
+**Tested**
+- `test_action.py` (37). `FakeGitHub` keeps comments in memory behind `httpx2.MockTransport`;
+  the checkout is a temp repo. Covers:
+  - event parsing (normal, fork, no path, missing file, bad JSON, push event, missing
+    fields)
+  - `fit` (cut at a line, marker kept, `<details>` closed), annotation escaping,
+    stop-commands
+  - comments: **create**, **update in place**, unchanged → no write, a fake marker by
+    another user left alone, own comment found on page 3, personal-token login
+  - permission error (with hint), **fork PR** (warning + summary, exit 0, fork note only
+    when the LLM was missing)
+  - no LLM key → "heuristic" + "repository secret" in the comment
+  - missing token, shallow checkout
+  - gate exits 1 after posting; budget; dry run makes no API calls and needs no token
+  - hostile `::commands::` in the PR title/body all land inside the stop-commands block
+  - pagination refuses other hosts; read 403 is not a permission error
+  - CLI: env inputs, empty inputs, exit 2 + `::error::`, `--event --dry-run`, outside
+    Actions, help
+  - `.env` skipped in Actions
+  - `action.yml` valid and injection-free; example workflow shape
+- The YAML test caught a real bug: an unquoted `: ` made `action.yml` invalid YAML, which
+  GitHub would have rejected.
+- `conftest.py`: the runner's `GITHUB_*` variables can't leak into tests (matters once
+  CI runs the suite).
+- `pytest -q` → 556 passed. `ruff check .` → all passed. `ruff format --check .` → clean.
+- Demo:
+  - Simulated Actions run on the demo repo: a real-shaped event file, `GITHUB_ACTIONS=true`,
+    a job-summary file, `--dry-run --fail-on high` → `can_delete` #1 (75 high, out of scope),
+    the plan inside `::stop-commands::`, a 1.6 KB job summary, `::error::` gate annotation,
+    exit 1.
+  - `action.yml`'s exact install commands in a clean venv → `review-map action` runs.
+- Not tested yet: a real run on GitHub (hand-off below).
+
+**Known limitations**
+- The action reinstalls Review Map on each run (about 20-30 s); no pip cache yet.
+- The comment is a plain issue comment, not inline review comments (by design: one plan).
+- On fork PRs the plan is only in the job summary, unless the repo grants fork PRs write
+  tokens.
+- `budget` sets the max number of sections; the line fraction stays in `.reviewmap.yml`.
+- If two older comments with our marker exist (e.g. created before the concurrency group
+  was added), only the first is updated.
+
+**Hand-off: test on a real repo** (after pushing this phase)
+1. Create a new public test repo, e.g. `review-map-test`, with a README.
+2. Add `.github/workflows/review-map.yml` with the contents of `examples/workflow.yml`.
+   It uses `EshanGoel07/review-map@main`. Push it to `main`.
+3. Optional: Settings → Secrets and variables → Actions → New repository secret →
+   `GROQ_API_KEY`.
+4. Create a branch, change some code (e.g. add a function with an `if user.is_admin or ...`
+   check), write a PR description that doesn't mention it, and open the PR.
+5. Expect: the Actions tab shows "Review Map" running; one comment appears on the PR.
+6. Push another commit → the **same** comment updates (no second one). Edit the PR
+   description → it updates again.
+7. Optional: set `fail-on: high` and check that the check turns red while the comment still
+   posts.
+
+**What I should understand from this phase**
+- In CI the code under review is untrusted: config from base, no `.env`, inputs via env vars,
+  and PR text kept away from the runner's command parser.
+- "Find our comment" needs two facts (marker *and* author); one is forgeable.
+- Least privilege: the workflow asks only for `contents: read` and `pull-requests: write`;
+  fork PRs get less, and the tool degrades instead of failing.
+- Concurrency and idempotency (same input → same comment, no extra writes) keep a bot quiet.

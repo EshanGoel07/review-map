@@ -1,4 +1,4 @@
-"""Minimal GitHub REST client: JSON reads now, comments in Phase 8.
+"""Minimal GitHub REST client: JSON reads, paginated lists and comment writes.
 
 Every expected failure (not found, bad token, rate limit, network) becomes a
 `GitHubError` with a hint, so the CLI never shows a raw traceback for them.
@@ -17,6 +17,12 @@ from review_map.errors import ReviewMapError
 API_URL = "https://api.github.com"
 ENV_TOKEN = "GITHUB_TOKEN"
 TIMEOUT_SECONDS = 20.0
+MAX_PAGES = 30  # 3,000 items: far more comments than a PR plausibly has
+
+WRITE_HINT = (
+    "Give the workflow `permissions: pull-requests: write`. PRs from forks only get a "
+    "read-only token, so they can't be commented on."
+)
 
 TOKEN_URL = "https://github.com/settings/personal-access-tokens/new"
 
@@ -39,6 +45,10 @@ def token_hint(private: bool = False) -> str:
 
 class GitHubError(ReviewMapError):
     """A GitHub API call failed in an expected way."""
+
+
+class GitHubPermissionError(GitHubError):
+    """The token may read but not write (missing permission, or a PR from a fork)."""
 
 
 def token_from_env(env: Mapping[str, str] | None = None) -> str | None:
@@ -106,10 +116,11 @@ class GitHubClient:
     def __exit__(self, *exc: object) -> None:
         self.close()
 
-    def get_json(self, path: str, *, what: str) -> Any:
-        """GET `path` and return its JSON. `what` names the thing for error messages."""
+    def _request(
+        self, method: str, url: str, *, what: str, json: Any = None, write: bool = False
+    ) -> httpx.Response:
         try:
-            response = self._http.get(path)
+            response = self._http.request(method, url, json=json)
         except httpx.TimeoutException:
             raise GitHubError(
                 "GitHub did not answer in time.", hint="Check your connection and try again."
@@ -118,13 +129,56 @@ class GitHubClient:
             raise GitHubError(
                 f"Could not reach GitHub: {exc}", hint="Check your connection and try again."
             ) from None
-        self._raise_for_status(response, what)
+        self._raise_for_status(response, what, write=write)
+        return response
+
+    @staticmethod
+    def _json(response: httpx.Response, what: str) -> Any:
         try:
             return response.json()
         except ValueError:
             raise GitHubError(f"GitHub returned an unreadable answer for {what}.") from None
 
-    def _raise_for_status(self, response: httpx.Response, what: str) -> None:
+    def get_json(self, path: str, *, what: str) -> Any:
+        """GET `path` and return its JSON. `what` names the thing for error messages."""
+        return self._json(self._request("GET", path, what=what), what)
+
+    def get_all(self, path: str, *, what: str, max_pages: int = MAX_PAGES) -> list[Any]:
+        """GET a list endpoint, following `Link: rel="next"` pages (100 items each)."""
+        items: list[Any] = []
+        url: str | None = f"{path}{'&' if '?' in path else '?'}per_page=100"
+        for _ in range(max_pages):
+            if url is None:
+                break
+            response = self._request("GET", url, what=what)
+            page = self._json(response, what)
+            if not isinstance(page, list):
+                raise GitHubError(f"GitHub returned an unexpected answer for {what}.")
+            items += page
+            url = response.links.get("next", {}).get("url")
+            if url and httpx.URL(url).host != self._http.base_url.host:
+                raise GitHubError(f"GitHub sent a next-page link to another host for {what}.")
+        return items
+
+    def post_json(self, path: str, body: Any, *, what: str) -> Any:
+        return self._json(self._request("POST", path, what=what, json=body, write=True), what)
+
+    def patch_json(self, path: str, body: Any, *, what: str) -> Any:
+        return self._json(self._request("PATCH", path, what=what, json=body, write=True), what)
+
+    def login(self) -> str | None:
+        """The token's user login, or None when GitHub won't say (e.g. an Actions token)."""
+        if not self.token:
+            return None
+        try:
+            data = self.get_json("/user", what="the token's user")
+        except GitHubError:
+            return None
+        return data.get("login") if isinstance(data, dict) else None
+
+    def _raise_for_status(
+        self, response: httpx.Response, what: str, *, write: bool = False
+    ) -> None:
         status = response.status_code
         if status < 400:
             return
@@ -153,10 +207,10 @@ class GitHubClient:
             )
         if status == 403:
             detail = _api_message(response)
-            raise GitHubError(
-                f"GitHub refused access to {what} (403)" + (f": {detail}" if detail else "."),
-                hint="Check that your token has read access to this repo.",
-            )
+            message = f"GitHub refused access to {what} (403)" + (f": {detail}" if detail else ".")
+            if write:
+                raise GitHubPermissionError(message, hint=WRITE_HINT)
+            raise GitHubError(message, hint="Check that your token has read access to this repo.")
         if status >= 500:
             raise GitHubError(
                 f"GitHub had a server error ({status}).", hint="Try again in a minute."
