@@ -113,3 +113,16 @@ def test_default_base_none_found(git_repo):
     git_repo.commit("base")
     with pytest.raises(GitError, match="Could not guess the base"):
         git_source.default_base(git_repo.path)
+
+
+def test_diff_keeps_lone_carriage_returns_inside_lines(git_repo):
+    """Python's text mode would turn a lone "\r" into a line break and break parsing."""
+    git_repo.write("a.txt", "one\n")
+    git_repo.commit("base")
+    git_repo.git("checkout", "-q", "-b", "feature")
+    (git_repo.path / "a.txt").write_bytes(b"one\nfoo\rbar\x0cbaz\nthree\r\n")
+    git_repo.commit("feature")
+    text = git_source.get_diff(git_repo.path, "main", "feature")
+    assert "foo\rbar" in text
+    (changed,) = parse_diff(text)
+    assert changed.added == 2

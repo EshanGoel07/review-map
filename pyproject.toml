@@ -37,10 +37,18 @@ dependencies = [
 [project.scripts]
 review-map = "review_map.cli:app"
 
+[project.optional-dependencies]
+train = [
+    "pandas>=3.1.0",
+    "pyarrow>=26.0.0",
+    "pydriller>=2.12",
+]
+
 [dependency-groups]
 dev = [
     "pytest>=8",
     "ruff>=0.6",
+    "review-map[train]",  # the Phase 9+ tests need pandas, pyarrow, pydriller
 ]
 
 [build-system]

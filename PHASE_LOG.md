@@ -695,3 +695,120 @@
 - Least privilege: the workflow asks only for `contents: read` and `pull-requests: write`;
   fork PRs get less, and the tool degrades instead of failing.
 - Concurrency and idempotency (same input → same comment, no extra writes) keep a bot quiet.
+
+## Phase 9 — Mine git history for training data
+
+**Built**
+- `training/mine.py`:
+  - `resolve_repo()`: a local path, or `owner/name` cloned with full history into
+    `data/repos/` (gitignored).
+  - `list_commits()`: PyDriller walks every non-merge commit, oldest first: SHA, parent,
+    committer date (UTC), author, subject, number of files.
+  - `is_fix_message()`: the **subject line** has a fix word (fix/fixes/fixed, bug,
+    bugfix, regression, revert, hotfix) and no "not really a bug" word (typo, docs,
+    readme, changelog, style, formatting, lint, flake8, pep8, ci…). The body is ignored.
+- `training/szz.py` (function-level SZZ). For each fix commit:
+  - Take the lines it removed or changed in non-test, non-docs source files.
+  - Drop blank, punctuation-only and comment-only lines, and lines the fix only re-spaced.
+  - `git blame --line-porcelain -w -M --ignore-revs-file` at the fix's parent →
+    (introducing commit, path, line). Huge commits (> 50 files) are in the ignore list, so
+    blame looks through reformats. Lines from root ("boundary") commits are dropped.
+  - Blame failures are counted, never silently treated as "nothing to blame".
+- `training/dataset.py`:
+  - One row per changed function per commit, using the **same diff parsing and function
+    mapping as `analyze`**. Only new or changed units with added lines, in non-test,
+    non-docs source files.
+  - Label = 1 if a later fix's blamed line is one of the lines this commit added *inside
+    this function*. Also `fix_commits` and `days_to_fix`.
+  - `too_recent` = within 180 days of the repo's newest commit. Rows are kept; Phase 10
+    decides what to do with them.
+  - Columns: repo, commit, date, author, path, name, kind, start/end line, added, removed,
+    commit_files, commit_tests_changed, is_fix, label, fix_commits, days_to_fix, too_recent.
+  - **Resumable**: one JSON line per commit is appended to `data/work/<repo>/commits.jsonl`
+    as soon as it's computed. Reruns skip what's done, and a torn last line from a crash
+    is closed off and ignored. A commit whose diff can't be read is recorded as skipped
+    with the reason, and mining goes on.
+- CLI `review-map mine REPO... [--data-dir data] [--out FILE] [--fresh]`, with a progress
+  bar and per-repo stats. It warns if git blame failed, or if fixes blamed nothing.
+- Packaging: `pandas`, `pyarrow`, `pydriller` are an optional extra,
+  `pip install 'review-map[train]'`, so CLI and Action users don't download them. The
+  `dev` group includes the extra so `uv sync` keeps the tests working. Without it,
+  `review-map mine` says how to install it.
+
+**Bugs found by running it on real history (each now has a regression test)**
+1. **Lone `\r` broke diff parsing** (this affected the product, not just mining).
+   `requests` has an Adobe Illustrator logo that git diffs as text. Python's subprocess
+   text mode turned its lone carriage returns into line breaks, so the hunks no longer
+   added up and parsing failed. `git_source` and blame now read bytes and decode them
+   without translating newlines. A PR with such a file would also have broken `analyze`.
+2. **Every blame failed silently.** The ignore-revs path was relative (`data/work/...`),
+   but `git -C repo` resolves it from inside the repo. Result: 521 fixes, 0 risky rows, no
+   error. Fixed with an absolute path, plus failure counting and CLI warnings so this can't
+   pass for clean data again.
+3. **Docs JavaScript was labelled.** A spot check found `docs/_static/native.js` (bundled
+   ad code) as "risky". `docs/` and `doc/` are now excluded, as agreed.
+
+**Files**
+`src/review_map/training/{mine,szz,dataset}.py`, `src/review_map/diff/git_source.py`,
+`src/review_map/cli.py`, `tests/test_szz.py`, `tests/test_git_source.py`, `pyproject.toml`,
+`uv.lock`, `CHANGELOG.md`.
+
+**Tested**
+- `test_szz.py` (53). A synthetic history is built in a temp dir: add `add()`/`discount()`,
+  introduce a /10-instead-of-/100 bug, an unrelated docs commit, then "Fix discount
+  percentage (#12)" 10 days later. Covers:
+  - SZZ labels exactly (bug commit, `discount`) = 1, with `days_to_fix` = 10. The earlier
+    version, `add`, and the fix itself are 0.
+  - fix-message detection (8 yes, 9 no, including "prefix", "fixture", "Fix typo", a
+    "fixes" in the body)
+  - line filters (`carries_code`, re-spacing), `-L` ranges, porcelain parsing with
+    boundary lines
+  - test-only fixes and comment/whitespace-only fixes blame nothing
+  - a 51-file reformat commit is skipped *and* blamed through
+  - merges are not mined; `too_recent` flag; the product's function ranges in rows
+  - resume after `stop_after` + a torn checkpoint line gives the same rows as a clean run,
+    with no commit mined twice; a rerun mines nothing
+  - an unreadable commit is skipped with its reason; lone `\r` / form-feed bytes
+  - relative work dir; blame failures counted; CLI warnings
+  - docs/tests are not labelable; parquet round trip (UTC dates, no helper columns)
+  - CLI (`--fresh`, rerun), help, bad targets, missing extra → friendly error
+- `test_git_source.py`: a lone `\r` and a form feed stay inside their lines.
+- `pytest -q` → 610 passed. `ruff check .` → all passed. `ruff format --check .` → clean.
+- Spot check of random risky rows in `requests`: a cookie-jar regression (fixed 579 days
+  later), a revert of a `TimedCache` change (61 days), `Session.request` fixed 33 and 44
+  days after changes. Plausible, apart from the docs JS, now excluded.
+- Demo: `review-map mine psf/requests pallets/flask` → 5 min 14 s, clones 35 MB, work files
+  7 MB, `data/dataset.parquet` 420 KB:
+
+  | repo | commits | fixes | rows | risky | rate | too recent |
+  |---|---|---|---|---|---|---|
+  | requests (2011–2026) | 4,883 | 521 | 8,113 | 619 | 7.6% | 351 |
+  | flask (2010–2026) | 3,829 | 446 | 7,230 | 433 | 6.0% | 28 |
+  | **total** | | | **15,343** | **1,052** | **6.9%** | 379 |
+
+  Median time from a change to its fix (requests): about 61 days; 90th percentile about
+  940 days.
+
+**Known limitations (SZZ noise, stated honestly)**
+- The keyword fix detection misses fixes whose subject lacks the words, and catches some
+  non-bugs ("fix" for features or refactors).
+- Fixes that only *add* code (a missing check) blame nothing: those bugs stay label 0.
+- A blamed line may have been changed as part of a refactor bundled with the fix, not
+  because it was buggy.
+- `blame -M` follows moves within a file only (no `-C` across files, for speed); code moved
+  between files is blamed on the move.
+- Label 0 means "no fix found", not "correct": especially for recent rows (`too_recent`)
+  and code deleted before anyone fixed it.
+- Only Python/JS/TS source is labelled; both repos are mostly Python. Activity per year is
+  uneven (most rows are 2011–2013), which Phase 10's time split must account for.
+- Rows are per commit, not per PR: projects that squash or merge PRs differently will give
+  different row sizes.
+
+**What I should understand from this phase**
+- SZZ turns history into labels for free, but the labels are noisy: filters reduce the
+  noise, and documentation keeps it honest.
+- Use the same code path for training data as for the product, or the model learns a
+  different world than it is used in.
+- Run on real data early: all three bugs above passed the synthetic tests and only showed
+  up on real history. "Zero risky rows" was a silent failure, not a result.
+- Long jobs need checkpoints, and must survive one bad input without stopping.

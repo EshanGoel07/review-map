@@ -26,13 +26,18 @@ _DIFF_FLAGS = [
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
     if shutil.which("git") is None:
         raise GitError("git is not installed or not on PATH.", hint="Install git and try again.")
-    return subprocess.run(
+    result = subprocess.run(
         ["git", "-c", "core.quotePath=false", "-C", str(repo), *args],
         capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
         check=False,
+    )
+    # Decode ourselves: Python's text mode turns a lone "\r" into a line break, which
+    # shifts every line after it and breaks diff parsing (e.g. a text-like design file).
+    return subprocess.CompletedProcess(
+        result.args,
+        result.returncode,
+        result.stdout.decode("utf-8", errors="replace"),
+        result.stderr.decode("utf-8", errors="replace"),
     )
 
 

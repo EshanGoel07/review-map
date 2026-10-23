@@ -805,6 +805,110 @@ def pull_request(
     _finish(run.plan, output_format, fail_on)
 
 
+@app.command()
+def mine(
+    targets: Annotated[
+        list[str],
+        typer.Argument(
+            metavar="REPO...",
+            help="Local repo paths, or GitHub owner/name to clone (e.g. psf/requests).",
+            show_default=False,
+        ),
+    ],
+    data_dir: Annotated[
+        Path, typer.Option("--data-dir", help="Where clones and work files are kept.")
+    ] = Path("data"),
+    out: Annotated[
+        Path | None,
+        typer.Option("--out", "-o", help="Dataset file. Default: DATA_DIR/dataset.parquet."),
+    ] = None,
+    fresh: Annotated[
+        bool, typer.Option("--fresh", help="Ignore saved progress and mine from scratch.")
+    ] = False,
+) -> None:
+    """Mine git history into a training dataset (needs the `train` extra).
+
+    One row per changed function per commit; label 1 if a later bug fix changed code
+    that commit wrote (function-level SZZ). Interrupted runs resume where they stopped.
+    """
+    from rich.progress import BarColumn, MofNCompleteColumn, Progress, TimeRemainingColumn
+
+    from review_map.training import dataset
+    from review_map.training import mine as mining
+
+    with friendly_errors():
+        all_rows: list[dict] = []
+        for target in targets:
+            repo = mining.resolve_repo(target, data_dir / "repos")
+            name = repo.resolve().name
+            work = data_dir / "work" / name
+            if fresh:
+                (work / dataset.CHECKPOINT).unlink(missing_ok=True)
+            with Progress(
+                f"[bold]{escape(name)}[/]",
+                BarColumn(),
+                MofNCompleteColumn(),
+                TimeRemainingColumn(),
+                console=err_console,
+                transient=True,
+            ) as bar:
+                task = bar.add_task("mining", total=None)
+                rows, stats, head = dataset.build_dataset(
+                    repo,
+                    work,
+                    name,
+                    on_progress=lambda done, total, task=task: bar.update(
+                        task, completed=done, total=total
+                    ),
+                )
+            positives = sum(r["label"] for r in rows)
+            console.print(
+                f"[bold]{escape(name)}[/] at {head[:12]}: {stats.commits} commits "
+                f"({stats.skipped_huge} huge, {stats.skipped_root} root and "
+                f"{stats.skipped_error} unreadable skipped, "
+                f"{stats.processed} mined now), {stats.fixes} fixes, "
+                f"{_plural(len(rows), 'row')}, {positives} risky "
+                f"({positives / len(rows):.1%})"
+                if rows
+                else f"[bold]{escape(name)}[/]: no rows"
+            )
+            if stats.blame_errors:
+                err_console.print(
+                    f"[bold yellow]Warning:[/] git blame failed on {stats.blame_errors} "
+                    "file(s); those fixes labelled nothing, so the labels undercount."
+                )
+            if stats.fixes and not stats.implicated_lines:
+                err_console.print(
+                    f"[bold yellow]Warning:[/] {stats.fixes} fixes but no blamed lines: "
+                    "the labels are probably wrong. Check git blame works in this repo."
+                )
+            if stats.implicated_lines:
+                console.print(
+                    f"  [dim]{stats.implicated_lines} blamed lines, "
+                    f"{stats.unmatched_lines} outside any dataset row[/]"
+                )
+            all_rows += rows
+
+        frame = dataset.to_frame(all_rows)
+        target_path = out or data_dir / "dataset.parquet"
+        dataset.save(frame, target_path)
+
+    total = len(frame)
+    positives = int(frame["label"].sum()) if total else 0
+    recent = int(frame["too_recent"].sum()) if total else 0
+    console.print(
+        f"\nWrote {escape(str(target_path))}: {_plural(total, 'row')}, "
+        f"[bold]{positives} risky[/] ({positives / total:.1%})"
+        if total
+        else "\nNo rows."
+    )
+    if total:
+        console.print(
+            f"[dim]{recent} rows are from the last {dataset.RECENT_DAYS} days (too_recent): "
+            "their label is less certain.[/]"
+        )
+
+
 @app.command("action")
 def github_action(
     event: Annotated[

@@ -39,6 +39,10 @@ uses [Semantic Versioning](https://semver.org/).
   comment per PR and updates it in place, writes the plan to the job summary, supports
   `fail-on`, `budget`, `provider` and `model` inputs, and works without an LLM key and on
   PRs from forks (summary only). `review-map action --dry-run` prints the comment.
+- `review-map mine REPO...` (needs `pip install 'review-map[train]'`): mines git history into
+  a training dataset (`data/dataset.parquet`), one row per changed function per commit,
+  labelled with function-level SZZ (did a later bug fix change code this commit wrote?).
+  Skips merges, root commits and commits over 50 files; resumable.
 
 ### Changed
 - `.env` is no longer loaded inside GitHub Actions (the working tree is the PR's code);
