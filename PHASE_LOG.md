@@ -654,7 +654,7 @@
     exit 1.
   - `action.yml`'s exact install commands in a clean venv → `review-map action` runs.
 - **Real GitHub test** (2026-10-23) on `EshanGoel07/review-map-test` (public during the test,
-  made private afterwards), PR #1: "Paginate the notes list". The description says
+  then made private and deleted), PR #1: "Paginate the notes list". The description says
   permissions are unchanged; the branch quietly adds `or user.is_admin or note.shared` to
   `can_delete`. Heuristic mode (no LLM secret).
   1. Opened → run 39970517728, job 21 s → **one comment created** by `github-actions[bot]`:
