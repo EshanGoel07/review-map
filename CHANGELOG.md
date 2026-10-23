@@ -43,6 +43,15 @@ uses [Semantic Versioning](https://semver.org/).
   a training dataset (`data/dataset.parquet`), one row per changed function per commit,
   labelled with function-level SZZ (did a later bug fix change code this commit wrote?).
   Skips merges, root commits and commits over 50 files; resumable.
+- Rule score and rule flags per dataset row, a per-commit file table
+  (`dataset-commits.parquet`) and `dataset-meta.json` (repo HEADs) from `review-map mine`.
+- `review-map evaluate`: trains a LightGBM risk model on the mined dataset with a
+  time-based split and a 180-day embargo, compares three model rankings with five
+  baselines on validation and test (recall at 10/20/30% of lines, PR-AUC, ROC-AUC),
+  checks calibration, runs a cross-repo test, and writes `reports/eval.md` and
+  `reports/metrics.json`. Methodology decisions are logged in `reports/DECISIONS.md`.
+- `review-map train --repo PATH`: train and evaluate a model on your own repo's history,
+  saved with a model card to `REPO/.reviewmap/model/`.
 
 ### Changed
 - `.env` is no longer loaded inside GitHub Actions (the working tree is the PR's code);

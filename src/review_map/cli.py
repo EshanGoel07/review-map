@@ -838,6 +838,8 @@ def mine(
 
     with friendly_errors():
         all_rows: list[dict] = []
+        all_commits: list[dict] = []
+        meta: dict[str, dict] = {}
         for target in targets:
             repo = mining.resolve_repo(target, data_dir / "repos")
             name = repo.resolve().name
@@ -860,6 +862,7 @@ def mine(
                     on_progress=lambda done, total, task=task: bar.update(
                         task, completed=done, total=total
                     ),
+                    commits_out=all_commits,
                 )
             positives = sum(r["label"] for r in rows)
             console.print(
@@ -888,10 +891,13 @@ def mine(
                     f"{stats.unmatched_lines} outside any dataset row[/]"
                 )
             all_rows += rows
+            meta[name] = {"source": target, "head": head, "commits": stats.commits}
 
         frame = dataset.to_frame(all_rows)
         target_path = out or data_dir / "dataset.parquet"
         dataset.save(frame, target_path)
+        dataset.save(dataset.commits_frame(all_commits), dataset.commits_path(target_path))
+        dataset.save_meta(target_path, meta)
 
     total = len(frame)
     positives = int(frame["label"].sum()) if total else 0
@@ -907,6 +913,180 @@ def mine(
             f"[dim]{recent} rows are from the last {dataset.RECENT_DAYS} days (too_recent): "
             "their label is less certain.[/]"
         )
+
+
+def _print_results(title: str, results: dict[str, dict], chosen: str | None = None) -> None:
+    from review_map.training.evaluate import METRIC_HEADERS, _fmt
+
+    table = Table(title=title, show_edge=False, header_style="bold", title_justify="left")
+    table.add_column("Method")
+    for _, header in METRIC_HEADERS:
+        table.add_column(header, justify="right")
+    for name, r in results.items():
+        cells = [_fmt(r[k], pct=k.startswith("recall")) for k, _ in METRIC_HEADERS]
+        table.add_row(escape(f"{name} ★" if name == chosen else name), *cells)
+    console.print(table)
+
+
+def _load_frames(path: Path) -> tuple[object, object]:
+    from review_map.training import dataset
+
+    try:
+        import pandas as pd
+    except ImportError:
+        raise ReviewMapError("pandas is not installed.", hint=dataset.TRAIN_EXTRA_HINT) from None
+    commits_file = dataset.commits_path(path)
+    for f in (path, commits_file):
+        if not f.is_file():
+            raise ReviewMapError(
+                f"Dataset file not found: {f}",
+                hint="Create it first with `review-map mine REPO...`.",
+            )
+    rows = pd.read_parquet(path)
+    missing = {"rule_score", "rules"} - set(rows.columns)
+    if missing:
+        raise ReviewMapError(
+            f"{path} was made by an older version (no {', '.join(sorted(missing))}).",
+            hint="Run `review-map mine` again: old progress is re-mined automatically.",
+        )
+    return rows, pd.read_parquet(commits_file)
+
+
+def _report_run(run: object, model_out: Path, source: str) -> None:
+    from review_map.training import evaluate as ev
+
+    run.trained.model.metrics = ev.metrics_json(run)
+    run.trained.model.save(model_out, ev.model_card(run, source))
+    chosen = run.chosen_ranking
+    _print_results("Test: newest 15% of history (time split)", run.results, chosen)
+    if run.cross_results is not None:
+        _print_results(
+            f"Cross-repo: train on {', '.join(run.cross_train)}, test on {run.cross_repo}",
+            run.cross_results,
+            chosen,
+        )
+    cal = run.calibration
+    status = "[green]passed[/]" if cal.passed else "[yellow]not passed[/]"
+    console.print(
+        f"\nCalibration {status}: ECE {cal.ece:.3f} (target ≤ {ev.ECE_TARGET}), "
+        f"Brier skill {cal.brier_skill:+.1%}"
+    )
+    console.print(f"Ranking chosen on validation (★): {escape(chosen)}")
+    console.print(escape(ev.verdict(run.results, chosen, "recall_20").replace("**", "")))
+    console.print(f"Model saved to {escape(str(model_out))}")
+
+
+@app.command()
+def evaluate(
+    dataset_file: Annotated[
+        Path, typer.Option("--dataset", help="Dataset from `review-map mine`.")
+    ] = Path("data/dataset.parquet"),
+    holdout_repo: Annotated[
+        str | None,
+        typer.Option("--holdout-repo", help="Also train on the other repos and test on this one."),
+    ] = None,
+    report: Annotated[Path, typer.Option("--report", help="Markdown report to write.")] = Path(
+        "reports/eval.md"
+    ),
+    notes: Annotated[
+        Path | None,
+        typer.Option("--notes", help="Hand-written discussion appended to the report."),
+    ] = None,
+    model_out: Annotated[
+        Path, typer.Option("--model-out", help="Where to save the trained model.")
+    ] = Path("data/models/general"),
+    metrics_out: Annotated[
+        Path | None,
+        typer.Option("--metrics", help="Raw metrics JSON. Default: next to the report."),
+    ] = None,
+) -> None:
+    """Train on the mined dataset and compare the model with baselines (needs `train`).
+
+    Time-based split per repo (newest 15% test; older rows, minus a 180-day embargo,
+    70:15 train:validation), a calibration check, and an optional cross-repo test.
+    Re-runs the first configuration too, so "changes after first results" stay
+    reproducible. Writes a Markdown report and the raw metrics as JSON.
+    """
+    import json as json_lib
+
+    from review_map.training import dataset as ds
+    from review_map.training import evaluate as ev
+
+    with friendly_errors():
+        rows, commits = _load_frames(dataset_file)
+        notes_text = None
+        if notes is not None:
+            try:
+                notes_text = notes.read_text(encoding="utf-8")
+            except OSError as exc:
+                raise ReviewMapError(f"Could not read {notes}: {exc.strerror or exc}") from None
+        ablation_configs = [
+            ("First results: no embargo, stop at the first section that doesn't fit", 0, "prefix"),
+            ("+ 180-day embargo", None, "prefix"),
+        ]
+        ablations = [
+            (label, ev.ablation_summary(ev.run_evaluation(rows, commits, None,
+                                                          embargo_days=e, selection=sel)))
+            for label, e, sel in ablation_configs
+        ]  # fmt: skip
+        run = ev.run_evaluation(rows, commits, holdout_repo)
+        ablations.append(("+ reading-plan budget rule (final)", ev.ablation_summary(run)))
+        repro = {
+            "environment": ev.environment(),
+            "dataset_meta": ds.load_meta(dataset_file),
+            "files": {str(f): ev.sha256(f) for f in (dataset_file, ds.commits_path(dataset_file))},
+            "commands": ev.COMMANDS,
+        }
+        report.parent.mkdir(parents=True, exist_ok=True)
+        _write(report, ev.render_report(run, notes_text, ablations, repro))
+        metrics = ev.metrics_json(run) | {
+            "ablations": [{"label": label, **a} for label, a in ablations],
+            "reproducibility": repro,
+        }
+        metrics_path = metrics_out or report.with_name("metrics.json")
+        _write(metrics_path, json_lib.dumps(metrics, indent=2, default=str) + "\n")
+        _report_run(run, model_out, f"{dataset_file}")
+    console.print(f"Wrote {escape(str(report))} and {escape(str(metrics_path))}")
+
+
+@app.command()
+def train(
+    repo: RepoOption = Path("."),
+    out: Annotated[
+        Path | None,
+        typer.Option("--out", "-o", help="Model folder. Default: REPO/.reviewmap/model."),
+    ] = None,
+    data_dir: Annotated[
+        Path,
+        typer.Option("--data-dir", help="Where mining progress is kept (resumable)."),
+    ] = Path("data"),
+) -> None:
+    """Train a risk model on your own repo's history (needs the `train` extra).
+
+    Mines the history (same as `review-map mine`), trains on the oldest 70%,
+    tests on the newest 15%, compares with the rule-based score, and saves the
+    model with a model card.
+    """
+    from review_map.training import dataset
+
+    with friendly_errors():
+        root = git_source.find_repo_root(repo)
+        name = root.name
+        commits: list[dict] = []
+        rows, stats, head = dataset.build_dataset(
+            root, data_dir / "work" / name, name, commits_out=commits
+        )
+        console.print(
+            f"[bold]{escape(name)}[/] at {head[:12]}: {stats.commits} commits, "
+            f"{stats.fixes} fixes, {_plural(len(rows), 'row')}, "
+            f"{sum(r['label'] for r in rows)} risky"
+        )
+        if not rows:
+            raise ReviewMapError("No changed functions found in this repo's history.")
+        from review_map.training import evaluate as ev
+
+        run = ev.run_evaluation(dataset.to_frame(rows), dataset.commits_frame(commits))
+        _report_run(run, out or root / ".reviewmap" / "model", f"{name} at {head[:12]}")
 
 
 @app.command("action")

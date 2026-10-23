@@ -812,3 +812,146 @@
 - Run on real data early: all three bugs above passed the synthetic tests and only showed
   up on real history. "Zero risky rows" was a silent failure, not a result.
 - Long jobs need checkpoints, and must survive one bad input without stopping.
+
+## Phase 10 — Features, training and evaluation
+
+**Decision log:** every methodology decision from Phase 9 onward is in
+**`reports/DECISIONS.md`** (D1–D23): dated, marked *before results*, *after seeing data*
+or *after test results*, with evidence, options and before/after effect. It will be kept up
+to date through Phase 12.
+
+**Built**
+- `risk/features.py`: 37 features per changed function.
+  - The change: added, removed, lines changed, function size, files in the commit, tests
+    changed, is a fix, unit kind (one-hot).
+  - The Phase 3 rules: total score and one flag per rule.
+  - The file's history *before* the commit: age, earlier changes, earlier fix commits,
+    distinct earlier authors.
+  - History is computed by walking commits in order and reading each file's state before
+    applying the commit, so nothing from later can leak in.
+- `training/dataset.py` / `mine`: rows now carry `rule_score` and `rules` (checkpoint
+  version 2; older records re-mine automatically). Also writes `dataset-commits.parquet`
+  (every file each commit touched) and `dataset-meta.json` (repo HEADs, commit counts).
+- `training/train.py`:
+  - **Split:** per repo by date, whole commits. Newest 15% test; of the rows at least
+    180 days older than the test period (**embargo**), 70:15 train:validation.
+  - **Labels:** realistic, meaning training and validation count only fixes made before
+    the test period.
+  - **Training:** LightGBM with fixed parameters, single-threaded and deterministic.
+    Class weighting and the number of trees are chosen on validation.
+  - **Calibration:** none / Platt / isotonic, chosen by 5-fold CV Brier score *within*
+    validation.
+- `risk/model.py`: a model folder (`model.txt`, `calibration.json`, `features.json`,
+  `metrics.json`, `model_card.md`), with save, load and predict. A missing `libomp`
+  gives a "brew install libomp" hint.
+- `training/evaluate.py`:
+  - **Metrics:** recall at 10/20/30% of lines, using the reading plan's "skip what doesn't
+    fit" budget rule, ties averaged over 10 seeds; PR-AUC; ROC-AUC.
+  - **Rankings:** model per function, model ÷ lines, model hybrid (high-risk first, then ÷
+    lines; "high" cut chosen on validation; high rows that don't fit are counted), rules,
+    rules ÷ lines, largest / smallest change first, random.
+  - Validation picks the ranking for Phase 11.
+  - Calibration: reliability table, ECE, Brier skill; plus the cross-repo test.
+  - The report includes data and per-split balance, ablations, limitations and a
+    reproducibility section (versions, seeds, HEADs, SHA-256 of the dataset, commands).
+- CLI:
+  - `review-map evaluate [--dataset] [--holdout-repo] [--report] [--notes] [--metrics]
+    [--model-out]`. It re-runs the first-results configurations as ablations, then writes
+    `reports/eval.md` and `reports/metrics.json`.
+  - `review-map train --repo PATH [--out] [--data-dir]` → `REPO/.reviewmap/model/`.
+- Reports (committed): `reports/eval.md` (generated, with the hand-written summary from
+  `reports/eval-notes.md`), `reports/metrics.json`, `reports/DECISIONS.md`.
+- Dependencies: `lightgbm`, `scikit-learn` in the `train` extra. LightGBM on macOS needs
+  `brew install libomp` (done).
+
+**Data:** requests + flask + click → 20,936 rows, 1,507 risky (7.2%). Test set: 3,067 rows,
+155 risky.
+
+**Results (test; full tables in `reports/eval.md`)**
+
+| Method | R@10% | R@20% | R@30% | PR-AUC | ROC-AUC |
+|---|---:|---:|---:|---:|---:|
+| model ÷ lines (chosen on validation) | 37.7% | **53.7%** | **69.4%** | 0.053 | 0.537 |
+| smallest change first | 36.8% | 53.2% | 67.7% | 0.041 | 0.400 |
+| rules ÷ lines | 23.5% | 41.9% | 48.6% | 0.046 | 0.448 |
+| random | 11.4% | 21.0% | 32.9% | 0.053 | 0.501 |
+| rules (Phase 3) | 7.0% | 17.7% | 16.3% | 0.065 | 0.551 |
+| model per function | 12.5% | 11.2% | 22.1% | **0.082** | **0.639** |
+| model hybrid | 12.5% | 11.2% | 28.0% | 0.080 | 0.609 |
+| largest change first | 0.0% | 0.1% | 2.8% | 0.080 | 0.600 |
+
+- **Headline:** the chosen ranking *ties* "smallest change first" (53.7% vs 53.2%, within
+  noise). Per repo: better on requests (83.6% vs 67.2%), worse on flask (34.5% vs 41.4%),
+  about equal on click (42.9% vs 41.1%).
+- **Cross-repo** (train requests + flask → test click): model ÷ lines 32.2% vs smallest
+  change first 31.7% (tie). Per function, largest change first beats the model on PR-AUC
+  (0.171 vs 0.153).
+- **Calibration: not passed.** ECE 0.023 (target ≤ 0.02); Brier skill +2.3%. Phase 11's
+  risk-coverage estimate will not be shown with this model.
+- **Hybrid:** 10% of rows count as "high", and they're big, so they fill the budget
+  (185 of 306 didn't fit at 20%). In Phase 11 "high" has to be rare.
+- **Changes after the first results** (all in DECISIONS.md, with the first configuration
+  re-run each time):
+  - **Embargo:** trees 7 → 23, but per-function PR-AUC 0.113 → 0.082 and calibration still
+    fails. Validation's risky rate is still 3.9% vs 7.9% in training, so labels are still
+    maturing, or there is drift.
+  - **Budget rule:** rules R@20% 9.4% → 17.7%; the model per function unchanged.
+  - **New rankings:** model ÷ lines, rules ÷ lines, hybrid.
+
+**Files**
+`src/review_map/risk/{features,model}.py`, `src/review_map/training/{train,evaluate,dataset,mine}.py`,
+`src/review_map/cli.py`, `tests/test_train.py`, `tests/test_szz.py`, `reports/{eval.md,eval-notes.md,metrics.json,DECISIONS.md}`,
+`pyproject.toml`, `uv.lock`, `CHANGELOG.md`.
+
+**Tested**
+- `test_train.py` (37).
+  - **Leakage:** history counts only earlier commits; adding future commits doesn't
+    change past features; flipping every label doesn't change any feature.
+  - **Split:** ordered by date, whole commits, recent rows dropped, 70/15/15. The embargo
+    gap is disjoint, with train and validation ≥ 180 days before the test period; zero
+    embargo gives the plain split.
+  - **Realistic labels.**
+  - **Calibrator:** the three kinds and their JSON round trip; it fixes overconfident
+    scores; too few positives → "none". It sees **only validation rows** (spy).
+  - **Budget rules:** "fit" vs "prefix" on hand examples.
+  - **Hybrid:** high rows first; high rows that don't fit are counted.
+  - **Choosers:** the cut and the ranking come from validation numbers.
+  - **Calibration maths and verdict wording.** Other model rankings are never the
+    "baseline".
+  - **End to end on a synthetic dataset with a planted signal:** the model learns it.
+    Also the report sections, model save/load, a friendly error for too little history,
+    the CLI (`evaluate` writes the report, ablations and `metrics.json`; missing or old
+    dataset → friendly errors; `train` on a tiny repo explains why), help, and the
+    `libomp` hint.
+- `test_szz.py`: `mine` writes the commit table and `dataset-meta.json`.
+- `pytest -q` → 639 passed. `ruff check .` → all passed. `ruff format --check .` → clean.
+- **Determinism:** two `review-map evaluate` runs give byte-identical `metrics.json`.
+- Checked by hand: identical ablation rows and identical ECE looked suspicious; full
+  precision showed real differences (0.0234 vs 0.0231) and identical per-function
+  selections, not a bug.
+- **Demo:**
+  - `review-map mine psf/requests pallets/flask pallets/click` → 7 min (resumable;
+    re-run: 56 s, nothing re-mined).
+  - `review-map evaluate --holdout-repo click --notes reports/eval-notes.md` → 5 s.
+  - `review-map train --repo data/repos/click` → 12 s. Model + card saved.
+
+**Known limitations**
+- The model's measured value over "smallest change first" is about zero on this data. The
+  rules alone rank functions only slightly better than random.
+- **Validation choices are unstable on small data.** For `train --repo` on click alone,
+  validation chose "per function", which lost on test (15.4% vs 41.1% for smallest change
+  first), while "÷ lines" would have scored 45.2%.
+- Calibration fails, and the cause (label maturity or drift) isn't fully fixed by the
+  embargo.
+- The model trains on 70% of history; Phase 11 should decide whether to refit on everything.
+- LightGBM is needed to *use* a model (Phase 11 decides how normal users run it).
+- All of `reports/eval.md`'s limitations: SZZ noise, small data, Python only, uneven
+  history, per-commit rows, per-path history, lines as effort, and post-hoc changes.
+
+**What I should understand from this phase**
+- Evaluate the way the product is used: a budget in lines turns "most likely to be buggy"
+  into "most risk per line", and simple size rules are strong there.
+- Time leaks in two ways: features (use only the past) and labels (fixes take time). An
+  embargo is the usual guard, but it isn't a cure.
+- When a result changes the method, log it, re-run the "before", and say it was post hoc.
+- A tie with a trivial baseline is a real result, and reporting it honestly is the point.

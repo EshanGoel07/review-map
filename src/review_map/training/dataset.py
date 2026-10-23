@@ -20,7 +20,7 @@ import json
 from collections import defaultdict
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -30,13 +30,24 @@ from review_map.diff import git_source
 from review_map.diff.parser import parse_diff
 from review_map.errors import ReviewMapError
 from review_map.models import ChangedFile, ChangedUnit
-from review_map.risk.rules import is_test_path
-from review_map.training.mine import TRAIN_EXTRA_HINT, CommitInfo, head_sha, list_commits
+from review_map.risk.rules import is_test_path, score_units
+from review_map.training.mine import (
+    TRAIN_EXTRA_HINT,
+    CommitInfo,
+    changed_paths,
+    head_sha,
+    list_commits,
+)
 from review_map.training.szz import implicated_by_fix, is_labelable
 
 RECENT_DAYS = 180
 CHECKPOINT = "commits.jsonl"
+# Bump when a record's contents change; older records are mined again automatically.
+CHECKPOINT_VERSION = 2  # 2: rule_score and rules per row
 IGNORE_REVS = "ignore-revs.txt"
+
+# One row per commit: everything it touched (tests and docs too), for history features.
+COMMIT_COLUMNS = ["repo", "seq", "commit", "date", "author", "is_fix", "paths"]
 
 COLUMNS = [
     "repo",
@@ -53,6 +64,8 @@ COLUMNS = [
     "commit_files",
     "commit_tests_changed",
     "is_fix",
+    "rule_score",
+    "rules",
     "label",
     "fix_commits",
     "days_to_fix",
@@ -74,6 +87,8 @@ def commit_change(repo: Path, c: CommitInfo) -> tuple[list[ChangedFile], list[Ch
 
 def _rows(c: CommitInfo, files: list[ChangedFile], units: list[ChangedUnit]) -> list[dict]:
     tests_changed = any(is_test_path(f.path) for f in files)
+    # The Phase 3 rules, exactly as `analyze` runs them: a baseline and model features.
+    risks = {s.unit.unit_id: s.risk for s in score_units(units, files, Config())}
     rows = []
     for u in units:
         if u.start_line is None or not u.added_lines:
@@ -96,6 +111,8 @@ def _rows(c: CommitInfo, files: list[ChangedFile], units: list[ChangedUnit]) -> 
                 "commit_files": c.files,
                 "commit_tests_changed": tests_changed,
                 "is_fix": c.is_fix,
+                "rule_score": risks[u.unit_id].score,
+                "rules": ",".join(sorted({r.rule for r in risks[u.unit_id].reasons})),
             }
         )
     return rows
@@ -149,7 +166,7 @@ def mine_commits(
     ignore_revs.write_text("".join(f"{c.sha}\n" for c in commits if c.is_huge), encoding="utf-8")
 
     checkpoint = work_dir / CHECKPOINT
-    records = read_checkpoint(checkpoint)
+    records = [r for r in read_checkpoint(checkpoint) if r.get("v") == CHECKPOINT_VERSION]
     done = {r["sha"] for r in records}
     todo = [c for c in commits if c.sha not in done]
     if checkpoint.is_file() and checkpoint.stat().st_size:
@@ -163,7 +180,12 @@ def mine_commits(
         for i, c in enumerate(todo, 1):
             if stop_after is not None and stats.processed >= stop_after:
                 break
-            record: dict[str, Any] = {"sha": c.sha, "rows": [], "implicated": []}
+            record: dict[str, Any] = {
+                "v": CHECKPOINT_VERSION,
+                "sha": c.sha,
+                "rows": [],
+                "implicated": [],
+            }
             if c.parent is None:
                 record["skipped"] = "root"
             elif c.is_huge:
@@ -266,10 +288,66 @@ def build_dataset(
     *,
     on_progress: Callable[[int, int], None] | None = None,
     stop_after: int | None = None,
+    commits_out: list[dict] | None = None,
 ) -> tuple[list[dict], MineStats, str]:
-    """Mine one repo and label its rows. Returns rows, stats and the HEAD it was mined at."""
+    """Mine one repo and label its rows. Returns rows, stats and the HEAD it was mined at.
+
+    `commits_out`, if given, receives one dict per commit (COMMIT_COLUMNS).
+    """
     records, commits, stats = mine_commits(
         repo, work_dir, on_progress=on_progress, stop_after=stop_after
     )
     rows = label_rows(records, commits, repo_name, stats)
+    if commits_out is not None:
+        paths = changed_paths(repo)
+        commits_out += [
+            {
+                "repo": repo_name,
+                "seq": seq,
+                "commit": c.sha,
+                "date": c.date.isoformat(),
+                "author": c.author,
+                "is_fix": c.is_fix,
+                "paths": paths.get(c.sha, []),
+            }
+            for seq, c in enumerate(commits)
+        ]
     return rows, stats, head_sha(repo)
+
+
+def commits_frame(commits: list[dict]) -> Any:
+    try:
+        import pandas as pd
+    except ImportError:
+        raise ReviewMapError("pandas is not installed.", hint=TRAIN_EXTRA_HINT) from None
+    frame = pd.DataFrame(commits, columns=COMMIT_COLUMNS)
+    frame["date"] = pd.to_datetime(frame["date"], utc=True)
+    return frame
+
+
+def commits_path(dataset_path: Path) -> Path:
+    """The commit table, next to the dataset: dataset.parquet → dataset-commits.parquet."""
+    return dataset_path.with_name(f"{dataset_path.stem}-commits{dataset_path.suffix}")
+
+
+def meta_path(dataset_path: Path) -> Path:
+    return dataset_path.with_name(f"{dataset_path.stem}-meta.json")
+
+
+def save_meta(dataset_path: Path, repos: dict[str, dict]) -> None:
+    """Which commit each repo was mined at, for reproducing the dataset."""
+    from review_map import __version__
+
+    meta = {
+        "review_map": __version__,
+        "created": datetime.now(UTC).isoformat(timespec="seconds"),
+        "repos": repos,
+    }
+    meta_path(dataset_path).write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+
+
+def load_meta(dataset_path: Path) -> dict:
+    try:
+        return json.loads(meta_path(dataset_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}

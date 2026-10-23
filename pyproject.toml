@@ -39,9 +39,11 @@ review-map = "review_map.cli:app"
 
 [project.optional-dependencies]
 train = [
+    "lightgbm>=4.7.0",
     "pandas>=3.1.0",
     "pyarrow>=26.0.0",
     "pydriller>=2.12",
+    "scikit-learn>=1.9.1",
 ]
 
 [dependency-groups]

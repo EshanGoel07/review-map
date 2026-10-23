@@ -118,3 +118,15 @@ def list_commits(repo: Path) -> list[CommitInfo]:
             )
         )
     return commits
+
+
+def changed_paths(repo: Path) -> dict[str, list[str]]:
+    """Every file each non-merge commit touched (new paths for renames), in one git call."""
+    result = _git(repo, "log", "--no-merges", "--no-renames", "--format=%x00%H", "--name-only")
+    if result.returncode != 0:
+        raise GitError(f"git log failed in {repo}: {result.stderr.strip()}")
+    out: dict[str, list[str]] = {}
+    for block in result.stdout.split("\x00")[1:]:
+        sha, _, rest = block.partition("\n")
+        out[sha.strip()] = [p for p in rest.split("\n") if p.strip()]
+    return out

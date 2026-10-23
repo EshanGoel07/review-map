@@ -4,6 +4,7 @@ Each test builds a small git history in a temp folder (introduce a bug, then fix
 it) and checks that SZZ blames exactly the right commit and function.
 """
 
+import json
 import sys
 from pathlib import Path
 
@@ -432,6 +433,10 @@ def test_cli_mine(history, tmp_path):
     assert "1 fixes" in result.output
     assert "1 risky" in result.output
     assert out.is_file()
+    meta = json.loads(dataset.meta_path(out).read_text())
+    assert meta["repos"]["repo"]["head"] == history["fix"]
+    assert meta["repos"]["repo"]["commits"] == 5
+    assert dataset.commits_path(out).is_file()
     again = runner.invoke(
         app,
         [
