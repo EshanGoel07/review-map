@@ -87,6 +87,8 @@ Other commands: `review-map --help`, and `review-map COMMAND --help` for each on
 
 ## GitHub Action
 
+Listed on the GitHub Marketplace as
+[**Review Map Reading Plan**](https://github.com/marketplace/actions/review-map-reading-plan).
 Add `.github/workflows/review-map.yml` to your repo:
 
 ```yaml

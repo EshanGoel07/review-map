@@ -1,7 +1,7 @@
-name: Review Map
-description: >-
-  Post one short reading plan on each pull request: what to read carefully, in which
-  order, and which changes the description didn't mention.
+# Marketplace rules: the name must be unique (a "review-map" organization exists) and
+# the description under 125 characters.
+name: Review Map Reading Plan
+description: "One reading plan per PR: what to read carefully, in what order, and what the description didn't mention."
 author: Eshan Goel
 branding:
   icon: map

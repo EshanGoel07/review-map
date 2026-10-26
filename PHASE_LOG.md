@@ -1156,6 +1156,11 @@ and `tests/snapshots/*`, `reports/{backtest.md,backtest-notes.md,DECISIONS.md}`,
   its consoles, because rich fixes a console's width when it's created. Tests now pass
   with COLUMNS unset, 40, 80 and 120 (724 each).
 - Lesson: test output must not depend on the developer's terminal.
+- Marketplace publishing rejected `action.yml`. The name "Review Map" clashes with an
+  existing `review-map` GitHub organization, and the description was over 125
+  characters. The action is now "Review Map Reading Plan", with a 104-character
+  description; `test_action_yml_meets_marketplace_rules` guards both. Workflows still say
+  `uses: EshanGoel07/review-map@…`, because the action's name doesn't affect that.
 
 **Known limitations**
 - Not on PyPI yet: install from GitHub or a clone.

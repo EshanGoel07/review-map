@@ -565,6 +565,13 @@ def test_action_yml_is_safe_and_complete():
     assert env["GITHUB_TOKEN"] == "${{ inputs.github-token }}"
 
 
+def test_action_yml_meets_marketplace_rules():
+    spec = yaml.safe_load((ROOT / "action.yml").read_text())
+    assert len(spec["description"]) < 125
+    assert spec["name"].lower() != "review map"  # taken by the "review-map" organization
+    assert spec["branding"] == {"icon": "map", "color": "blue"}
+
+
 def test_example_workflow():
     flow = yaml.safe_load((ROOT / "examples" / "workflow.yml").read_text())
     triggers = flow[True]  # YAML 1.1 reads the key `on` as True

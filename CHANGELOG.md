@@ -20,6 +20,8 @@ First release.
   place after confirming, owner-only permissions, offers to gitignore it), then run
   `doctor`. `--non-interactive` prints the steps instead.
 - README for first-time users, and a CI workflow running this repo's tests and lint.
+- GitHub Action published as "Review Map Reading Plan" (the name "Review Map" is taken
+  by an existing GitHub organization); use it as `EshanGoel07/review-map@v0.1.0`.
 - Project skeleton, packaging (`pyproject.toml`) and the `review-map` console script.
 - `review-map version` command.
 - `review-map diff`: list files changed between two git refs (`base...head`), flagging binary,
@@ -90,3 +92,6 @@ First release.
 
 ### Fixed
 - Pin `tree-sitter<0.26`: 0.26.0 segfaults when parsing larger files repeatedly.
+
+[Unreleased]: https://github.com/EshanGoel07/review-map/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/EshanGoel07/review-map/releases/tag/v0.1.0
