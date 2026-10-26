@@ -319,3 +319,12 @@ All numbers are from `reports/metrics.json` unless stated otherwise. "Test" is t
 - **Why:** to measure the product's real behaviour, not a pooled ranking.
 - **Limits:** no descriptions, so no scope check; one commit ≠ one PR; and the test
   period isn't fresh for decisions made after the Phase 10 results.
+
+## Phase 12: polish
+
+### D29. No methodology changes in Phase 12
+- **Date / phase:** 2026-10-26, Phase 12.
+- **Decision:** Phase 12 changed nothing in the data, model, reading plan, backtest or
+  metrics. The README's evaluation section quotes `reports/eval.md` and
+  `reports/backtest.md` unchanged, including the ties with "smallest change first" and
+  random. `doctor` and `setup` only affect setup.

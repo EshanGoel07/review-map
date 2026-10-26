@@ -1076,3 +1076,128 @@ and `tests/snapshots/*`, `reports/{backtest.md,backtest-notes.md,DECISIONS.md}`,
 - An untrusted PR must not control its own scoring. Read config *and* models from the base.
 - Measure the product, not just the model. Phase 6's gate looked sensible, but it cut
   recall from 60.6% to 23.9%, and only an end-to-end backtest showed it.
+
+## Phase 12 — Polish for users
+
+**Built**
+- `review-map doctor [--repo] [--offline]` (`doctor.py`): ✓ / ✗ / – checks, each with a fix.
+  - Checks: git; Python ≥ 3.11; `.reviewmap.yml` valid; the LLM (provider, model, key set,
+    one tiny test call); `GITHUB_TOKEN` and the live rate limit; LLM and repo cache folders
+    writable; which risk model is used; `.env` gitignored.
+  - Key and token values are never printed.
+  - Exit 1 only when a *required* check fails (git, Python, config). A broken LLM key or
+    token is shown as ✗ but doesn't block: `analyze` falls back without them.
+- `review-map setup [--env-file] [--non-interactive]` (`setup_wizard.py`):
+  - Pick a provider (Groq default, Gemini, Anthropic, OpenAI, Ollama, none), paste the
+    key hidden, choose a model, add an optional `GITHUB_TOKEN`.
+  - An existing `.env` is updated in place, keeping other lines, after a confirmation.
+    An existing value is replaced only after its own confirmation; duplicate lines are
+    commented out.
+  - The file is written owner-only (600). If `.env` isn't gitignored, setup warns and
+    offers to add it. It offers to run `doctor` at the end.
+  - `--non-interactive` prints the steps instead.
+- `README.md` rewritten for first-time visitors:
+  - pitch, the problem, and the differences (scope check first);
+  - a 5-minute quick start, the Action with permissions, secrets and fork notes;
+  - real demo output, screenshot slots, and a Mermaid diagram (live and offline pipelines);
+  - config and LLM provider reference;
+  - the honest evaluation and backtest tables;
+  - security and privacy, limitations and roadmap (incl. Phase 10b), development and
+    licence.
+- Version `0.1.0`, `CHANGELOG.md` `[0.1.0]`, and `.github/workflows/ci.yml`:
+  - ruff, pytest and a demo smoke test;
+  - on Python 3.11, 3.12 and 3.13, on push to main and on PRs.
+- `.gitignore`: removed the duplicate `PLAN.md` line; one rule remains, and `PLAN.md` and
+  `NOTES.md` are still ignored.
+- `examples/workflow.yml` now uses `@v0.1.0`.
+- `docs/images/` is ready for the screenshots.
+- DECISIONS.md D29: no methodology changes in this phase.
+
+**Files**
+`src/review_map/{doctor,setup_wizard,cli,__init__}.py`, `tests/test_doctor_setup.py`,
+`README.md`, `CHANGELOG.md`, `.github/workflows/ci.yml`, `.gitignore`, `examples/workflow.yml`,
+`docs/images/.gitkeep`, `reports/DECISIONS.md`, `PHASE_LOG.md`.
+
+**Tested**
+- `test_doctor_setup.py` (26), all with fake probes or fake input, no network:
+  - **doctor:** zero-config is usable; the key is tested but never shown; a rejected key
+    is ✗ but still usable; network errors; an explicit provider without a key;
+    `--offline` makes no calls; the token's rate limit and a bad token; invalid config →
+    exit 1; not a git repo; git missing and Python too old; cache not writable; `.env` not
+    gitignored; the CLI output and exit codes.
+  - **setup:** `.env` text editing (in place, appended, duplicates, comments kept);
+    conflicts; the wizard writes a 600 file and never echoes the key; it asks before
+    touching an existing `.env`; it keeps an existing key unless told otherwise; it fixes
+    `.gitignore`; the "none" choice; an unknown choice; running doctor at the end;
+    `--non-interactive`.
+- `pytest -q` → **724 passed** on Python 3.12, and also on 3.11 and 3.13 in separate
+  venvs, which is the CI matrix. `ruff check .` → all passed. `ruff format --check .` →
+  clean.
+- Real `review-map doctor` in the dev repo: the Groq test call worked, and only "set"
+  was printed.
+- **Clean install:**
+  - A new Python 3.12 venv outside the repo; `pip install` from the repo folder (not
+    editable).
+  - Only `review-map` is installed of the ML packages (no lightgbm, numpy, pandas or
+    sklearn), and the shipped model still runs.
+  - `review-map version` → 0.1.0.
+  - The demo build → `analyze` reads the hidden `can_delete` change first (75 high, out of
+    scope).
+  - `doctor` → Ready, exit 0. `--format html` works, and so does `setup --non-interactive`.
+
+**Known limitations**
+- Not on PyPI yet: install from GitHub or a clone.
+- Screenshots in the README are placeholders until they're taken.
+- `doctor`'s LLM test uses one tiny real request, a few tokens.
+
+**What I should understand from this phase**
+- First-run experience is part of the product: zero-config must work, and every missing
+  piece must say exactly how to fix it.
+- Secrets handling is about defaults: hidden input, never echoed, owner-only files,
+  gitignore checks, and no `.env` inside CI.
+- A README that reports where the project *doesn't* win is more credible than one that
+  hides it.
+
+---
+
+## Final summary (v0.1.0)
+
+**What Review Map is:** a CLI and GitHub Action that turns a pull request into a short
+reading plan.
+- **Read carefully:** a few sections, in order, with reasons.
+- **Unmentioned changes and contradictions:** found by a deterministic check of the PR
+  description against the diff, function by function.
+- **Skim:** everything else.
+
+**How it was built** (12 phases, each tested and committed separately):
+
+| Phases | What |
+|---|---|
+| 0–2 | Packaging and CLI; diff parsing and config; tree-sitter mapping of changed lines to functions (Python, JS, TS) |
+| 3 | Rule-based risk score with human-readable reasons |
+| 4–5 | LLM claim parser (5 providers, injection defences, cache, heuristic fallback); deterministic scope verifier |
+| 6 | Reading plan with a budget; text, Markdown, JSON (stable schema) and HTML; `--fail-on` CI gate |
+| 7–8 | Real GitHub PRs (`review-map pr`); GitHub Action with one auto-updating comment, fork-safe |
+| 9–10 | SZZ mining of requests, flask and click; leak-free features; LightGBM with a time split and embargo; honest evaluation; decision log |
+| 11 | Pure-Python model reader; scorer fallback chain; model-aware plan; backtest |
+| 12 | `doctor`, `setup`, README, CI, v0.1.0 |
+
+**Results, honestly** (`reports/eval.md`, `reports/backtest.md`):
+- **Ranking:** the model's per-line ranking reads 53.7% of later-fixed functions at 20%
+  of lines. That ties "smallest change first" (53.2%), and is far above random (21.0%).
+- **Calibration** failed, so only levels are shown.
+- **Backtest:** the full reading plan ties random at catching later-fixed code (60.6% vs
+  61.5%). The rare "high" level is 3.5× enriched for later fixes.
+- **Not measured:** the scope check, the core feature, can't be backtested from history.
+- **Audit trail:** 29 methodology decisions are logged with before/after numbers in
+  `reports/DECISIONS.md`.
+
+**Quality:** 724 tests, with no network access in tests; ruff clean; CI on Python 3.11
+to 3.13; the clean install works without any ML libraries.
+
+**Next (Phase 10b and beyond):**
+- more repos and just-in-time features, an effort-aware objective, cleaner labels, a fresh
+  holdout;
+- a GitHub App;
+- more languages;
+- `--working-tree` mode.

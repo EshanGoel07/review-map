@@ -6,7 +6,20 @@ uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-26
+
+First release.
+
 ### Added
+- `review-map doctor`: checks git, Python, `.reviewmap.yml`, the LLM (one tiny test call;
+  `--offline` skips it), `GITHUB_TOKEN` and its rate limit, the cache folders, the risk
+  model, and that `.env` is gitignored. Prints ✓/✗ with a fix for each problem and never
+  prints key values. Exit code 1 only if Review Map can't run.
+- `review-map setup`: interactive wizard to pick an LLM provider (Groq default, Gemini,
+  Anthropic, OpenAI, Ollama or none), paste keys (hidden), and write `.env` (updated in
+  place after confirming, owner-only permissions, offers to gitignore it), then run
+  `doctor`. `--non-interactive` prints the steps instead.
+- README for first-time users, and a CI workflow running this repo's tests and lint.
 - Project skeleton, packaging (`pyproject.toml`) and the `review-map` console script.
 - `review-map version` command.
 - `review-map diff`: list files changed between two git refs (`base...head`), flagging binary,

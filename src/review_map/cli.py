@@ -1209,6 +1209,144 @@ def backtest(
         console.print(f"Wrote {escape(str(report))}")
 
 
+def _print_checks(checks: list) -> None:
+    styles = {True: "green", False: "red", None: "yellow"}
+    width = max(len(c.name) for c in checks)
+    for c in checks:
+        style = styles[c.ok]
+        console.print(f"[{style}]{c.symbol}[/] {escape(c.name.ljust(width))}  {escape(c.detail)}")
+        if c.fix and c.ok is not True:
+            console.print(f"  {' ' * width}  [dim]→ {escape(c.fix)}[/]")
+
+
+@app.command()
+def doctor(
+    repo: RepoOption = Path("."),
+    offline: Annotated[
+        bool,
+        typer.Option("--offline", help="Skip the network checks (LLM test call, GitHub)."),
+    ] = False,
+) -> None:
+    """Check your setup and say how to fix anything that's missing.
+
+    Checks git, Python, .reviewmap.yml, the LLM (one tiny test call), GITHUB_TOKEN and
+    its rate limit, the cache folders, the risk model, and that .env is gitignored.
+    Key values are never printed. Exit code 0 if Review Map can run, 1 if not.
+    """
+    import os
+
+    from review_map.doctor import run_checks, usable
+
+    with friendly_errors():
+        checks = run_checks(repo, os.environ, offline=offline)
+    console.print("[bold]Review Map doctor[/]\n")
+    _print_checks(checks)
+    if usable(checks):
+        optional = [c for c in checks if c.ok is not True]
+        extra = " Optional items above can make it better." if optional else ""
+        console.print(f"\n[green]Ready:[/] Review Map can run here.{extra}")
+        return
+    console.print("\n[red]Not ready:[/] fix the ✗ items marked above.")
+    raise typer.Exit(1)
+
+
+@app.command()
+def setup(
+    env_file: Annotated[
+        Path, typer.Option("--env-file", help="Where to write the settings.")
+    ] = Path(".env"),
+    non_interactive: Annotated[
+        bool,
+        typer.Option("--non-interactive", help="Print the setup steps instead of asking."),
+    ] = False,
+) -> None:
+    """Interactive setup: pick an LLM provider, paste keys, write them to .env.
+
+    Keys are typed hidden and never printed. An existing .env is updated in place
+    after you confirm, and existing values are only replaced if you say so.
+    Nothing is needed to get started: every step can be skipped.
+    """
+    from review_map import setup_wizard as sw
+    from review_map.claims.llm import PROVIDERS
+
+    if non_interactive:
+        typer.echo(sw.NON_INTERACTIVE_STEPS, nl=False)
+        return
+
+    with friendly_errors():
+        console.print("[bold]Review Map setup[/]\n")
+        console.print("Which LLM should read PR descriptions?")
+        for i, name in enumerate(sw.CHOICES, start=1):
+            console.print(f"  {i}. {name} [dim]({sw.CHOICE_NOTES[name]})[/]")
+        picked = typer.prompt("Choice", default="1")
+        provider = (
+            sw.CHOICES[int(picked) - 1]
+            if picked.isdigit() and 1 <= int(picked) <= len(sw.CHOICES)
+            else picked.strip().lower()
+        )
+        if provider not in sw.CHOICES:
+            raise ReviewMapError(f"Unknown choice: {picked!r}", hint="Pick a number from the list.")
+
+        answers = sw.Answers(provider)
+        if provider != "none":
+            info = PROVIDERS[provider]
+            if info.key_env:
+                console.print(f"Get a key at {sw.KEY_URLS[provider]}")
+                key = typer.prompt(
+                    f"{info.key_env} (hidden; Enter to skip)",
+                    default="",
+                    hide_input=True,
+                    show_default=False,
+                )
+                answers.api_key = key.strip() or None
+            model = typer.prompt("Model", default=info.default_model)
+            answers.model = model.strip() or None
+        token = typer.prompt(
+            "GITHUB_TOKEN (optional, hidden; Enter to skip)",
+            default="",
+            hide_input=True,
+            show_default=False,
+        )
+        answers.github_token = token.strip() or None
+
+        updates = sw.plan_updates(answers)
+        if not updates:
+            console.print("Nothing to write. Review Map works without keys (heuristic parser).")
+        else:
+            text = env_file.read_text(encoding="utf-8") if env_file.is_file() else ""
+            if env_file.is_file() and not typer.confirm(
+                f"Update {env_file}? Other lines are kept.", default=True
+            ):
+                console.print("Not written.")
+                return
+            for name in sw.conflicts(text, updates):
+                if not typer.confirm(f"{name} already has a value. Replace it?", default=False):
+                    updates.pop(name)
+            sw.write_env(env_file, sw.update_env_text(text, updates))
+            names = ", ".join(updates) or "nothing"
+            console.print(f"[green]Wrote[/] {escape(str(env_file))}: {escape(names)}")
+            if provider != "none" and PROVIDERS[provider].key_env and not answers.api_key:
+                console.print(
+                    f"[yellow]No key given:[/] add {PROVIDERS[provider].key_env}=... later."
+                )
+
+        if provider == "none":
+            console.print("No LLM: descriptions will be read by the heuristic parser.")
+        ignored = sw.is_gitignored(env_file.resolve())
+        if env_file.is_file() and ignored is False:
+            console.print(
+                f"[bold red]Warning:[/] {escape(str(env_file))} is not gitignored, "
+                "so your keys could be committed."
+            )
+            if typer.confirm("Add it to .gitignore?", default=True):
+                sw.add_to_gitignore(env_file.resolve().parent, env_file.name)
+                console.print("Added to .gitignore.")
+
+        if typer.confirm("Run `review-map doctor` now?", default=True):
+            load_dotenv(env_file, override=True)
+            doctor(repo=Path("."), offline=False)
+
+
 @app.command("action")
 def github_action(
     event: Annotated[

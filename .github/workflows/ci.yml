@@ -1,0 +1,48 @@
+# Tests and lint for Review Map itself (not the Action users add to their repos:
+# that is action.yml, with an example in examples/workflow.yml).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install
+        run: uv sync --locked
+
+      - name: Lint
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+
+      - name: Tests (no network: LLM and GitHub are mocked)
+        run: uv run pytest -q
+
+      - name: Demo smoke test
+        run: |
+          uv run python examples/demo_repo/build.py "$RUNNER_TEMP/demo"
+          uv run review-map analyze --repo "$RUNNER_TEMP/demo" --base main --no-llm
+          uv run review-map doctor --offline --repo "$RUNNER_TEMP/demo"
