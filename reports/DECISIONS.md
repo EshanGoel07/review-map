@@ -242,4 +242,80 @@ All numbers are from `reports/metrics.json` unless stated otherwise. "Test" is t
   rest of the budget. If high units don't all fit, the plan says so ("N more high-risk
   sections didn't fit the budget").
 - **Why:** see D20.
-- **Effect:** to be measured in Phase 11's backtest.
+- **Effect (measured in Phase 11, reports/backtest.md):** with "high" made rare (D25), only
+  1 high section in 666 held-out commits didn't fit. The floor makes the plan read more
+  lines: 37.4% vs 23.2% for model ÷ lines without it, for about the same recall (60.6% vs
+  60.0%). In the 106 commits where the budget binds, it's 26.5% vs 25.3%.
+
+## Phase 11: shipping the model and the backtest
+
+### D24. Ship the evaluated model as is, not refitted on all data
+- **Date / phase:** 2026-10-26, Phase 11. **Timing:** after test results.
+- **Decision:** `assets/default_model/` is byte-for-byte the model evaluated in
+  `reports/eval.md` (`data/models/general/`, trained on the oldest 70% of each repo).
+- **Why:** every number in eval.md and backtest.md then describes exactly the model users
+  get. A refit on all data would probably be a little better on new code, but it would be
+  unmeasured.
+- **Options:** refit on all rows with the same settings; ship as evaluated (chosen).
+- **Effect:** none on the numbers.
+
+### D25. Model levels: "high" = top 2%, "medium" = top 10% of validation scores
+- **Date / phase:** 2026-10-26, Phase 11. **Timing:** after test results (Phase 10 showed
+  that "high" = top 10% fills the budget), but defined before the backtest ran.
+- **Decision:** the cuts are the 98% and 90% quantiles of the model's validation scores,
+  read from the model's own `metrics.json`, so a repo-trained model gets its own cuts. For
+  the shipped model: high ≥ 0.121, medium ≥ 0.079 (calibrated). Probabilities are never
+  shown, only levels, because calibration failed (D13).
+- **Why:** the plan requires "high" to be rare. The calibrated scores fall on only 8
+  isotonic steps, so a step cut is needed. On test, 0.121 marks 2.7% of rows; the 99%
+  quantile is the same step, and the next step up (0.364) marks 0.03% (1 row).
+- **Effect (backtest):** 84 of 3,067 functions were high (2.7%), and 17.9% of those were
+  later fixed vs 5.1% overall. One high section in 666 commits didn't fit 5 sections.
+
+### D26. With the model, every model-scored section can fill the budget
+- **Date / phase:** 2026-10-26, Phase 11. **Timing:** after test results (the backtest);
+  chosen by the user. Validation agrees.
+- **Decision:** after the must-read sections, every section the model scores (low ones
+  too) is eligible, ordered by model risk per line. Sections the model doesn't apply to
+  (tests, docs, deleted code, the description file) keep Phase 6's gate (priority ≥ 30).
+  Out-of-scope violations join "high" in the must-read group (the scope check is the main
+  feature; D23 only named high-risk units). Rules-only mode is unchanged.
+- **Why (evidence):** with Phase 6's gate (medium or higher only), the plan read almost
+  nothing in most commits (0.5 sections per commit):
+
+  | Configuration | Validation: later-fixed read | Test: later-fixed read | Test: lines read |
+  |---|---:|---:|---:|
+  | medium-or-higher gate (before) | 34.8% | 23.9% | 29.2% |
+  | every section eligible (after) | 53.6% | 60.6% | 37.4% |
+
+- **Options:** keep the gate; every section (chosen); gate plus a second "if you have time"
+  list.
+- **Caveat:** it ties random at the same budget (61.5% at 27.6% of lines). The "before" is
+  still measured in every backtest run (row "same, medium-or-higher gate (before D26)").
+
+### D27. No risk-coverage estimate in v0.1
+- **Date / phase:** 2026-10-26, Phase 11. **Timing:** after test results.
+- **Decision:** the optional per-PR "risk-coverage estimate" is not built. The plan,
+  Markdown, HTML and JSON say the model isn't calibrated, and JSON has
+  `risk_scorer.calibrated`.
+- **Why:** the plan only allows it for a model that passed calibration, and the shipped
+  model didn't (D13). A repo-trained model might pass, but nothing in this project has,
+  so the code would ship unexercised. Phase 10b can add it.
+
+### D28. Backtest design
+- **Date / phase:** 2026-10-26, Phase 11. **Timing:** before the backtest ran.
+- **Decision:**
+  - Replay each commit of the held-out test period (the same rows as eval.md's test set)
+    as one PR.
+  - Use the default budget (15% of lines, at least 40, at most 5 sections) and the same
+    `select_sections` code as `analyze`.
+  - Use the dataset's leak-free features and full labels.
+  - Compare at the same budget: rules-only plan, model ÷ lines without the floor,
+    smallest first, random (20 seeds).
+  - Report "commits where the budget forces a choice" separately, because the 40-line
+    floor reads small commits in full.
+  - Examples are chosen by a fixed rule (spread over repos, big commits first, high level
+    first, soonest fix), not by hand.
+- **Why:** to measure the product's real behaviour, not a pooled ranking.
+- **Limits:** no descriptions, so no scope check; one commit ≠ one PR; and the test
+  period isn't fresh for decisions made after the Phase 10 results.

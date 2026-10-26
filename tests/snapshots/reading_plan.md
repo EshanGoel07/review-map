@@ -26,6 +26,6 @@
 </details>
 
 ---
-<sub>Review Map 0.0.0-test · a reading plan, not a review. The description is treated as untrusted input and checked against the diff.</sub>
+<sub>Review Map 0.0.0-test · a reading plan, not a review. The description is treated as untrusted input and checked against the diff. Risk: rules only.</sub>
 
 <!-- review-map -->

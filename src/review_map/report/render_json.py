@@ -3,7 +3,7 @@
 The output is built field by field (not dumped from internal models), so internal
 changes don't silently change the format. Breaking changes bump `schema_version`.
 
-Schema version 1:
+Schema version 1 (fields marked "added in 0.1.0" are additive):
 
     {
       "schema_version": 1,
@@ -12,6 +12,7 @@ Schema version 1:
       "summary": {
         "files_changed", "files_skipped", "units_changed", "lines_changed",
         "budget_lines", "max_units", "read_units", "read_lines": int,
+        "high_risk_unfit": int,     # model-"high" sections that didn't fit (added in 0.1.0)
         "highest_level": "high"|"medium"|"low"|null,
         "unmentioned": int, "claimed_but_missing": int
       },
@@ -30,8 +31,12 @@ Schema version 1:
         "scope": null | {"level": "function"|"file"|"folder"|"none",
                          "reasons": [str], "out_of_scope": [str]},
         "boost": int, "priority": 0-100, "level": str,
+        "model_level": "high"|"medium"|"low"|null,   # null: rules only / not applicable
         "section": "read_carefully"|"skim", "rank": int|null, "unmentioned": bool
       }],
+      "risk_scorer": {"name": "rules"|"shipped default model"|"model trained on this repo",
+                      "calibrated": bool},
+                      # model probabilities are never output: levels only (D25)
       "file_violations": [{"path": str, "item": str}],
       "claimed_but_missing": [{"kind": "file"|"function", "claim": str}],
       "not_checkable": [str],
@@ -83,6 +88,7 @@ def _item(item: PlanItem, has_scope: bool) -> dict[str, Any]:
         "boost": item.boost,
         "priority": item.priority,
         "level": item.level.value,
+        "model_level": item.model_level.value if item.model_level else None,
         "section": item.section.value,
         "rank": item.rank,
         "unmentioned": item.is_unmentioned,
@@ -112,6 +118,7 @@ def plan_to_dict(plan: ReadingPlan) -> dict[str, Any]:
             "max_units": s.max_units,
             "read_units": s.read_units,
             "read_lines": s.read_lines,
+            "high_risk_unfit": s.high_risk_unfit,
             "highest_level": highest.value if highest else None,
             "unmentioned": len(plan.unmentioned) + len(plan.file_violations),
             "claimed_but_missing": len(scope.claimed_but_missing) if scope else 0,
@@ -129,6 +136,7 @@ def plan_to_dict(plan: ReadingPlan) -> dict[str, Any]:
         if claims
         else None,
         "items": [_item(i, scope is not None) for i in plan.items],
+        "risk_scorer": {"name": plan.scorer, "calibrated": plan.scorer_calibrated},
         "file_violations": [{"path": v.path, "item": v.item} for v in plan.file_violations],
         "claimed_but_missing": [
             {"kind": m.kind, "claim": m.claim} for m in (scope.claimed_but_missing if scope else [])

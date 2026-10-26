@@ -19,6 +19,7 @@
     "max_units": 5,
     "read_units": 1,
     "read_lines": 2,
+    "high_risk_unfit": 0,
     "highest_level": "high",
     "unmentioned": 2,
     "claimed_but_missing": 1
@@ -97,6 +98,7 @@
       "boost": 30,
       "priority": 95,
       "level": "high",
+      "model_level": null,
       "section": "read_carefully",
       "rank": 1,
       "unmentioned": true
@@ -139,11 +141,16 @@
       "boost": 0,
       "priority": 15,
       "level": "low",
+      "model_level": null,
       "section": "skim",
       "rank": null,
       "unmentioned": false
     }
   ],
+  "risk_scorer": {
+    "name": "rules",
+    "calibrated": false
+  },
   "file_violations": [
     {
       "path": "billing/new.py",

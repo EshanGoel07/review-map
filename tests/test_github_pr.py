@@ -482,7 +482,8 @@ def test_pr_second_run_uses_cached_commits(fake_github):
 def test_pr_json_matches_the_local_analysis(fake_github, remote):
     data = json.loads(run_pr("--format", "json").stdout)
     ranked = [i["name"] for i in data["items"] if i["rank"]]
-    assert ranked[0] == "can_edit"
+    assert ranked[:2] == ["refund", "can_edit"]  # out of scope first (D26)
+    assert data["risk_scorer"]["name"] == "shipped default model"
     assert data["change"]["base"] == "main"
     assert data["change"]["head"] == "someone:feature"
     assert data["change"]["head_sha"] == remote.git("rev-parse", "refs/pull/7/head")
@@ -614,7 +615,9 @@ def test_pr_help():
 def test_skim_list_names_the_file_for_module_level_code(git_repo):
     _make_feature(git_repo)
     result = runner.invoke(
-        app, ["analyze", "--repo", str(git_repo.path), "--base", "main", "--no-llm"], env=WIDE
+        app,
+        ["analyze", "--repo", str(git_repo.path), "--base", "main", "--no-llm", "--rules-only"],
+        env=WIDE,
     )
     assert result.exit_code == 0, result.output
     skim_line = next(line for line in result.output.splitlines() if "Safe to skim" in line)

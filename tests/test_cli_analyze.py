@@ -30,7 +30,7 @@ def analyze(repo: Path, *args: str, **kwargs):
 
 def test_analyze_text(git_repo):
     _make_feature(git_repo)
-    result = analyze(git_repo.path)
+    result = analyze(git_repo.path, "--rules-only")  # the Phase 6 layout and counts
     assert result.exit_code == 0, result.output
     out = result.output
     assert "Read carefully (2 of 5 sections" in out
@@ -47,10 +47,24 @@ def test_analyze_ranks_hidden_changes_first(git_repo):
     _make_feature(git_repo)
     data = json.loads(analyze(git_repo.path, "--format", "json").stdout)
     ranked = [(i["name"], i["rank"]) for i in data["items"] if i["rank"]]
-    assert ranked == [("can_edit", 1), ("refund", 2)]
+    # With the model, out-of-scope violations are must-read and come first, and the
+    # rest of the budget is filled by risk per line (D26).
+    assert ranked[:2] == [("refund", 1), ("can_edit", 2)]
+    names = [i["path"] for i in data["items"] if i["rank"]]
+    assert "changes.md" not in names  # not model-scored: keeps the rules gate
+    assert data["risk_scorer"] == {"name": "shipped default model", "calibrated": False}
     assert data["claims"]["description"] == "changes.md"
     assert data["change"]["base"] == "main"
     assert len(data["change"]["head_sha"]) == 40
+
+
+def test_analyze_rules_only_keeps_the_priority_order(git_repo):
+    _make_feature(git_repo)
+    data = json.loads(analyze(git_repo.path, "--format", "json", "--rules-only").stdout)
+    ranked = [(i["name"], i["rank"]) for i in data["items"] if i["rank"]]
+    assert ranked == [("can_edit", 1), ("refund", 2)]
+    assert all(i["model_level"] is None for i in data["items"])
+    assert data["risk_scorer"]["name"] == "rules"
 
 
 def test_analyze_markdown(git_repo):
@@ -145,7 +159,9 @@ def test_analyze_gate_passes_for_harmless_change(git_repo):
     git_repo.commit("feature")
     result = analyze(git_repo.path, "--fail-on", "medium")
     assert result.exit_code == 0, result.output
-    assert "Nothing stands out" in result.output
+    rules = analyze(git_repo.path, "--fail-on", "medium", "--rules-only")
+    assert rules.exit_code == 0, rules.output
+    assert "Nothing stands out" in rules.output
 
 
 def test_analyze_gate_still_applies_with_file_output(git_repo, tmp_path):

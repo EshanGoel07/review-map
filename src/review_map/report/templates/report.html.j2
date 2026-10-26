@@ -94,11 +94,12 @@
 {% for item in plan.read_carefully %}
   <li>
     <b>#{{ item.rank }}</b>
-    <span class="badge {{ item.level.value }}">{{ item.priority }} {{ item.level.value }}</span>
+    <span class="badge {{ item.level.value }}">{{ level_label(item) }}</span>
     <a href="#u-{{ loop.index }}"><code>{{ item.unit.path }}</code> · <b><code>{{ item.unit.name }}</code></b></a>
     <span class="muted mono">L{{ line_range(item) }} · +{{ item.unit.added }} −{{ item.unit.removed }}</span>
     <ul class="reasons">
     {% for r in item.scope_reasons %}<li class="scope">{{ r }}</li>{% endfor %}
+    {% if model_reason(item) %}<li>{{ model_reason(item) }}</li>{% endif %}
     {% for r in item.risk.reasons if r.points > 0 %}<li>{{ r.message }}</li>{% endfor %}
     </ul>
   </li>
@@ -154,10 +155,11 @@
     <tr class="note {{ row.level }}"{% if item.unit_id in anchors %} id="u-{{ anchors[item.unit_id] }}"{% endif %}>
       <td colspan="3">
         {% if item.rank %}<b>#{{ item.rank }}</b> {% endif %}
-        <span class="badge {{ item.level.value }}">{{ item.priority }} {{ item.level.value }}</span>
+        <span class="badge {{ item.level.value }}">{{ level_label(item) }}</span>
         <b><code>{{ item.unit.name }}</code></b> <span class="muted">L{{ line_range(item) }}</span>
         <ul class="reasons">
         {% for r in item.scope_reasons %}<li class="scope">{{ r }}</li>{% endfor %}
+        {% if model_reason(item) %}<li>{{ model_reason(item) }}</li>{% endif %}
         {% for r in item.risk.reasons if r.points > 0 %}<li>{{ r.message }}</li>{% endfor %}
         </ul>
       </td>
@@ -180,7 +182,7 @@
 {% endif %}
 
 <footer>Review Map {{ version }} · a reading plan, not a review. The description is treated as
-  untrusted input and checked against the diff.</footer>
+  untrusted input and checked against the diff. {{ scorer_line(plan) }}</footer>
 </main>
 </body>
 </html>

@@ -259,7 +259,7 @@ def test_json_shape():
     data = json.loads(render_json(make_plan(CLAIMS)[0]))
     assert data["schema_version"] == SCHEMA_VERSION == 1
     assert list(data) == [
-        "schema_version", "tool", "change", "summary", "claims", "items",
+        "schema_version", "tool", "change", "summary", "claims", "items", "risk_scorer",
         "file_violations", "claimed_but_missing", "not_checkable", "skipped_files", "notes",
     ]  # fmt: skip
     item = data["items"][0]

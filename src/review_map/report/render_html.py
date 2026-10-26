@@ -13,7 +13,13 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from review_map import __version__
 from review_map.models import ChangedFile, LineKind, PlanItem, ReadingPlan
-from review_map.report.plan import all_reasons, line_range
+from review_map.report.plan import (
+    all_reasons,
+    level_label,
+    line_range,
+    model_reason,
+    scorer_line,
+)
 
 MAX_ROWS_PER_FILE = 3000
 
@@ -111,4 +117,7 @@ def render_html(plan: ReadingPlan, files: list[ChangedFile]) -> str:
         version=__version__,
         reasons=all_reasons,
         line_range=line_range,
+        model_reason=model_reason,
+        level_label=level_label,
+        scorer_line=scorer_line,
     )

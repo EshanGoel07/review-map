@@ -52,6 +52,20 @@ uses [Semantic Versioning](https://semver.org/).
   `reports/metrics.json`. Methodology decisions are logged in `reports/DECISIONS.md`.
 - `review-map train --repo PATH`: train and evaluate a model on your own repo's history,
   saved with a model card to `REPO/.reviewmap/model/`.
+- A pre-trained risk model ships with the package (`assets/default_model/`, with a model
+  card). It runs in plain Python, so LightGBM, numpy and scikit-learn aren't needed to use it.
+  Scorer fallback chain: the repo's model (`.reviewmap/model/`; for PRs and the Action, read
+  from the base commit), then the shipped model, then the rules. A missing or corrupt model
+  falls back with a note.
+- Reading plan with the model: model levels (high = top 2%, medium = top 10% of validation
+  scores) next to the rule reasons; high-risk and out-of-scope sections are read first
+  whatever their size ("N more high-risk sections didn't fit the budget" when they don't);
+  the rest of the budget is filled by model risk per changed line. Probabilities are never
+  shown (the model isn't calibrated). `--rules-only` on `analyze` and `pr`.
+- JSON (additive, still `schema_version: 1`): `items[].model_level`, `risk_scorer`,
+  `summary.high_risk_unfit`.
+- `review-map backtest --repo PATH | --dataset FILE`: replays held-out commits through the
+  real reading plan and writes `reports/backtest.md` with examples.
 
 ### Changed
 - `.env` is no longer loaded inside GitHub Actions (the working tree is the PR's code);

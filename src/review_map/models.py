@@ -252,7 +252,9 @@ class PlanItem(BaseModel):
     out_of_scope_items: list[str] = Field(default_factory=list)  # items this change violates
     boost: int = 0
     priority: int = Field(ge=0, le=100)
-    level: RiskLevel  # from priority, same thresholds as risk levels
+    level: RiskLevel  # from priority (and the model's level, if higher)
+    model_level: RiskLevel | None = None  # None: rules only, or the model doesn't apply
+    model_probability: float | None = Field(default=None, exclude=True)  # ordering only
     section: PlanSection = PlanSection.SKIM
     rank: int | None = None  # 1-based order within "read carefully"
 
@@ -275,6 +277,7 @@ class PlanSummary(BaseModel):
     max_units: int
     read_units: int
     read_lines: int
+    high_risk_unfit: int = 0  # model "high" sections that didn't fit max_units
 
 
 class ReadingPlan(BaseModel):
@@ -289,6 +292,8 @@ class ReadingPlan(BaseModel):
     summary: PlanSummary
     skipped_files: list[str] = Field(default_factory=list)  # binary, generated or ignored
     notes: list[str] = Field(default_factory=list)
+    scorer: str = "rules"  # "rules", "shipped default model" or "model trained on this repo"
+    scorer_calibrated: bool = False  # did the model pass the Phase 10 calibration check?
 
     @property
     def read_carefully(self) -> list[PlanItem]:

@@ -1,7 +1,7 @@
 """The analysis pipeline shared by `analyze`, `pr` and the GitHub Action.
 
-diff → units → risk scores → claims → scope check → reading plan. Each step is
-its own module; this file only wires them together.
+diff → units → risk scores (rules + model) → claims → scope check → reading plan.
+Each step is its own module; this file only wires them together.
 """
 
 from dataclasses import dataclass
@@ -16,6 +16,14 @@ from review_map.diff.parser import parse_diff
 from review_map.models import ChangedFile, ChangedUnit, ClaimedScope, ReadingPlan
 from review_map.report.plan import NO_DESCRIPTION_NOTE, build_plan
 from review_map.risk.rules import score_units
+from review_map.risk.scorer import (
+    REPO_MODEL_DIR,
+    change_context,
+    choose_model,
+    commit_reader,
+    folder_reader,
+    model_scores,
+)
 from review_map.verify.scope import verify_scope
 
 PR_DESCRIPTION = "PR description"
@@ -34,6 +42,9 @@ class LocalChange:
     head_sha: str
     loaded: LoadedConfig
     files: list[ChangedFile]
+    # False for PRs: their working tree is untrusted, so a repo model is read from the
+    # base commit (like the config), never from the PR's own files.
+    trusted_tree: bool = True
 
 
 def pr_change(root: Path, pr: PullRequest, loaded: LoadedConfig) -> LocalChange:
@@ -47,6 +58,7 @@ def pr_change(root: Path, pr: PullRequest, loaded: LoadedConfig) -> LocalChange:
         head_sha=pr.head_sha,
         loaded=loaded,
         files=files,
+        trusted_tree=False,
     )
 
 
@@ -74,6 +86,7 @@ def plan_for(
     no_llm: bool,
     no_cache: bool,
     missing_note: str = NO_DESCRIPTION_NOTE,
+    use_model: bool = True,
 ) -> PlanRun:
     """Score, check the description (if any) against the diff, and build the plan.
 
@@ -82,6 +95,16 @@ def plan_for(
     """
     changed = collect(change)
     scored = score_units(changed, change.files, change.loaded.config)
+    if change.trusted_tree:
+        folder = change.root / REPO_MODEL_DIR
+        choice = choose_model(folder_reader(folder), str(folder), use_model)
+    else:
+        reader = commit_reader(change.root, change.merge_base)
+        choice = choose_model(reader, f"{REPO_MODEL_DIR} (base commit)", use_model)
+    scores = None
+    if choice.model is not None:
+        ctx = change_context(change.root, change.merge_base, change.head_sha, change.files)
+        scores = model_scores(choice.model, scored, ctx)
     claims = scope = None
     cached = False
     if description is not None:
@@ -101,5 +124,9 @@ def plan_for(
         scope=scope,
         description=label,
         missing_description_note=missing_note,
+        model_scores=scores,
+        scorer=choice.model.label if choice.model else "rules",
     )
+    plan.notes += choice.notes
+    plan.scorer_calibrated = bool(choice.model and choice.model.calibrated)
     return PlanRun(plan, claims, cached)

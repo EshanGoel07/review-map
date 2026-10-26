@@ -955,3 +955,124 @@ to date through Phase 12.
   embargo is the usual guard, but it isn't a cure.
 - When a result changes the method, log it, re-run the "before", and say it was post hoc.
 - A tie with a trivial baseline is a real result, and reporting it honestly is the point.
+
+## Phase 11 — Ship the model + backtest
+
+**Decisions:** D24–D28 in `reports/DECISIONS.md` (D26 was made after the backtest results,
+chosen by me; the "before" is still measured in every run).
+
+**Built**
+- `risk/lgb_text.py`: reads LightGBM's text model and walks the trees in plain Python
+  (numerical splits, default/missing directions, sigmoid). On all 20,936 dataset rows it
+  matches LightGBM to 2e-16. Users don't need lightgbm, numpy, pandas or scikit-learn.
+- `assets/default_model/`: the evaluated model, unchanged (D24), plus a user-facing
+  `model_card.md`. Included in the wheel.
+- `risk/scorer.py`:
+  - **Fallback chain:** repo model (`.reviewmap/model/`) → shipped model → rules. Missing,
+    corrupt, wrong-feature or unsupported models fall back with a note, never a crash.
+  - **For `pr` and the Action**, the repo model is read from the base commit, like the
+    config, so a PR can't add a model that hides its own changes.
+  - **Live features** match training: change size, unit kind, files in the change, tests
+    changed, is-a-fix (head commit subject), rule flags, and per-file history from
+    `git log` (non-merge, no renames, before the base).
+  - The model applies only to code it was trained on: source, not tests or docs, with
+    added lines.
+  - **Levels (D25):** high = validation 98% quantile, medium = 90%.
+- `report/plan.py`:
+  - `select_sections` is shared with the backtest. With the model, high-risk and
+    out-of-scope sections are read first, whatever their size, up to max_units; the
+    plan notes "N more high-risk sections didn't fit the budget".
+  - The rest is ordered by model risk per line, and every model-scored section is
+    eligible (D26). Units the model doesn't score keep the rules gate. Rules-only mode is
+    unchanged.
+  - Level shown as `75 high`, or `medium (rules 10)` when the model raised it.
+  - The model reason comes after the scope reasons and before the rule reasons.
+  - A scorer line in text, Markdown and HTML. Probabilities are never shown.
+- JSON (additive): `items[].model_level`, `risk_scorer {name, calibrated}`,
+  `summary.high_risk_unfit`.
+- CLI: `--rules-only` on `analyze` and `pr`. New command
+  `review-map backtest --repo PATH | --dataset FILE [--model] [--report] [--notes]`.
+- `training/backtest.py`: replays every held-out commit as a PR through the real plan and
+  compares it at the same budget. Writes `reports/backtest.md` (hand-written summary in
+  `reports/backtest-notes.md`).
+
+**Results (backtest, 666 held-out commits, 155 later-fixed functions)**
+
+| Plan at the default budget | Later-fixed read | Lines read |
+|---|---:|---:|
+| Review Map (rules + model) | 60.6% | 37.4% |
+| same, medium-or-higher gate (before D26) | 23.9% | 29.2% |
+| Review Map, rules only | 16.8% | 24.6% |
+| model ÷ lines only (no high-risk floor) | 60.0% | 23.2% |
+| smallest change first | 58.7% | 22.3% |
+| random | 61.5% | 27.6% |
+
+- **Honest headline:** the plan ties random and smallest-first at catching later-fixed
+  code. The 40-line floor reads small commits in full whatever the order.
+- **Big commits** (where the budget forces a choice): the plan 26.5% at 26.6% of lines,
+  random 28.0% at 15.0%.
+- **"High" is rare and meaningful:** 2.7% of functions, 17.9% of them later fixed (3.5× the
+  base rate). Only 1 didn't fit the budget.
+
+**Files**
+`src/review_map/risk/{lgb_text,scorer}.py`, `src/review_map/assets/default_model/*`,
+`src/review_map/training/backtest.py`, `src/review_map/report/{plan,render_md,render_json,render_html}.py`,
+`src/review_map/report/templates/report.html.j2`, `src/review_map/{models,pipeline,cli}.py`,
+`tests/{test_scorer,test_backtest}.py`, updated `tests/{test_cli_analyze,test_github_pr,test_render}.py`
+and `tests/snapshots/*`, `reports/{backtest.md,backtest-notes.md,DECISIONS.md}`, `CHANGELOG.md`.
+
+**Tested**
+- `test_scorer.py` (48):
+  - **Tree walking:** hand-made trees, the missing-value rules, malformed models
+    rejected, and the shipped model vs LightGBM on random inputs.
+  - **Fallback chain:** repo model wins; none → default; five kinds of corruption →
+    default with a note; missing file; broken default → rules; `--rules-only`.
+  - **Repo model from the base commit**, not the PR (both the reader and the pipeline).
+  - **Live features:** history, the change context, every training column; the model
+    doesn't apply outside its training data.
+  - **Section picking:** must-read first, risk per line, skip what doesn't fit, unfit
+    count and note, unscored units keep the gate; level labels; reasons kept.
+  - **Display:** no probability anywhere in Markdown or JSON; the scorer line never says
+    "safe", "no bugs" or "guarantee"; the rules-only plan is unchanged.
+  - **End to end:** `analyze` uses the model; it runs with lightgbm, numpy, pandas and
+    sklearn **blocked**.
+- `test_backtest.py` (11):
+  - A repo-trained model run in pure Python matches LightGBM.
+  - It replays exactly the held-out commits, and the totals are consistent.
+  - The replay uses the same picking code; examples are real rows; the report sections
+    are all there.
+  - CLI: dataset, default model, argument errors, and a too-small repo → friendly error.
+- Updated, because the behaviour changed: with the model, the out-of-scope `refund`
+  ranks before the unclaimed `can_edit`, and both are still read. The text-layout tests
+  now use `--rules-only`. The snapshots only gained the additive fields and footer line.
+- `pytest -q` → 698 passed. `ruff check .` → all passed. `ruff format --check .` → clean.
+- `uv build` → the wheel contains `assets/default_model/*`.
+
+**Demo**
+- `review-map analyze` on the demo repo reads 3 of 5 sections:
+  1. the hidden permission change (`75 high`, out of scope);
+  2. `list_notes` (`medium (rules 10)`, the model's level);
+  3. `NoteStore.list_notes` (`medium (rules 10)`).
+
+  It ends with "Risk: rules + shipped default model (shown as levels; not calibrated, so
+  no percentages or risk-coverage estimate)."
+- `review-map backtest --dataset data/dataset.parquet --notes reports/backtest-notes.md`
+  → the table above in about 1.5 s.
+
+**Known limitations**
+- The ranking adds nothing measurable over random or size order. The model's real value
+  is the rare "high" flag.
+- The backtest can't measure the scope check (history has no descriptions), treats one
+  commit as one PR, and reuses eval.md's test period, so it isn't fresh for the post-hoc
+  decisions.
+- Live features approximate the training ones: a PR is not a commit (`commit_files` can
+  exceed the training maximum of 50, and "is a fix" comes from the head commit subject),
+  and the user's `sensitive_paths` can fire rules the training data never had.
+- No risk-coverage estimate (D27).
+
+**What I should understand from this phase**
+- Shipping a model means shipping its inputs too. Live features have to be computed
+  exactly like the training ones, or the scores mean nothing.
+- An untrusted PR must not control its own scoring. Read config *and* models from the base.
+- Measure the product, not just the model. Phase 6's gate looked sensible, but it cut
+  recall from 60.6% to 23.9%, and only an end-to-end backtest showed it.

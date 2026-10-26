@@ -57,7 +57,9 @@ from review_map.pipeline import (
 from review_map.report.plan import (
     all_reasons,
     gate_failed,
+    level_label,
     line_range,
+    scorer_line,
 )
 from review_map.report.render_html import render_html
 from review_map.report.render_json import render_json
@@ -361,6 +363,14 @@ NoLLMOption = Annotated[
 NoCacheOption = Annotated[
     bool, typer.Option("--no-cache", help="Ask the LLM again instead of using the cache.")
 ]
+RulesOnlyOption = Annotated[
+    bool,
+    typer.Option(
+        "--rules-only",
+        help="Score with the rules only (no risk model). Default: the repo's model "
+        "(.reviewmap/model), else the shipped one.",
+    ),
+]
 
 
 @app.command()
@@ -575,7 +585,7 @@ def _print_plan(plan: ReadingPlan, con: Console) -> None:
             why += [escape(r) for r in all_reasons(item)[len(item.scope_reasons) :]]
             table.add_row(
                 str(item.rank),
-                f"[{style}]{item.priority} {item.level.value}[/]",
+                f"[{style}]{level_label(item)}[/]",
                 f"{escape(item.unit.path)}:{line_range(item)}\n[bold]{escape(item.unit.name)}[/]",
                 "; ".join(why) or "-",
             )
@@ -612,6 +622,7 @@ def _print_plan(plan: ReadingPlan, con: Console) -> None:
         con.print(
             f"[dim]{_plural(s.files_skipped, 'file')} skipped (binary, generated or ignored)[/]"
         )
+    con.print(f"[dim]{escape(scorer_line(plan))}[/]")
 
 
 def _write(path: Path, content: str) -> None:
@@ -712,6 +723,7 @@ def analyze(
     config: ConfigOption = None,
     no_llm: NoLLMOption = False,
     no_cache: NoCacheOption = False,
+    rules_only: RulesOnlyOption = False,
 ) -> None:
     """Build the reading plan: what to read carefully, in which order, and what to skim.
 
@@ -726,7 +738,9 @@ def analyze(
             rel = _repo_relative(desc, change.root)
             label = "stdin" if str(desc) == "-" else (rel or str(desc))
             text = _read_description(desc)
-        run = plan_for(change, text, label, rel, no_llm=no_llm, no_cache=no_cache)
+        run = plan_for(
+            change, text, label, rel, no_llm=no_llm, no_cache=no_cache, use_model=not rules_only
+        )
         _emit(run, change, output_format, out, lambda: _print_header("Review Map", change))
     _finish(run.plan, output_format, fail_on)
 
@@ -777,6 +791,7 @@ def pull_request(
     ] = None,
     no_llm: NoLLMOption = False,
     no_cache: NoCacheOption = False,
+    rules_only: RulesOnlyOption = False,
 ) -> None:
     """Build the reading plan for a GitHub pull request.
 
@@ -800,6 +815,7 @@ def pull_request(
                 no_llm=no_llm,
                 no_cache=no_cache,
                 missing_note=PR_NO_DESCRIPTION_NOTE,
+                use_model=not rules_only,
             )
         _emit(run, change, output_format, out, lambda: _print_pr_header(pr, change, fetched))
     _finish(run.plan, output_format, fail_on)
@@ -1087,6 +1103,110 @@ def train(
 
         run = ev.run_evaluation(dataset.to_frame(rows), dataset.commits_frame(commits))
         _report_run(run, out or root / ".reviewmap" / "model", f"{name} at {head[:12]}")
+
+
+@app.command()
+def backtest(
+    repo: Annotated[
+        Path | None,
+        typer.Option("--repo", "-r", help="Mine this repo and replay its newest 15% of history."),
+    ] = None,
+    dataset_file: Annotated[
+        Path | None,
+        typer.Option("--dataset", help="Use a dataset from `review-map mine` instead of --repo."),
+    ] = None,
+    model_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--model",
+            help="Model folder. Default: REPO/.reviewmap/model if it exists, else the "
+            "shipped default model.",
+            show_default=False,
+        ),
+    ] = None,
+    report: Annotated[Path, typer.Option("--report", help="Markdown report to write.")] = Path(
+        "reports/backtest.md"
+    ),
+    notes: Annotated[
+        Path | None,
+        typer.Option("--notes", help="Hand-written discussion added to the report."),
+    ] = None,
+    data_dir: Annotated[
+        Path,
+        typer.Option("--data-dir", help="Where mining progress and clones are kept."),
+    ] = Path("data"),
+) -> None:
+    """Replay held-out history as if each commit were a new PR (needs the `train` extra).
+
+    For each commit in the newest 15% of history, builds the reading plan like
+    `analyze` does and checks whether it said to read the functions that later
+    needed a bug fix. Compares with the rules-only plan, smallest-first and random
+    at the same budget, and writes a report with concrete examples.
+    """
+    from review_map.config import ReadingBudget
+    from review_map.risk.scorer import DEFAULT_MODEL_DIR, ScoringModel, folder_reader
+    from review_map.training import backtest as bt
+    from review_map.training import dataset
+
+    with friendly_errors():
+        if (repo is None) == (dataset_file is None):
+            raise ReviewMapError("Pass exactly one of --repo PATH or --dataset FILE.")
+        repo_dirs: dict[str, Path] = {}
+        if repo is not None:
+            root = git_source.find_repo_root(repo)
+            commits: list[dict] = []
+            rows, stats, head = dataset.build_dataset(
+                root, data_dir / "work" / root.name, root.name, commits_out=commits
+            )
+            if not rows:
+                raise ReviewMapError("No changed functions found in this repo's history.")
+            frame, commit_frame = dataset.to_frame(rows), dataset.commits_frame(commits)
+            repo_dirs[root.name] = root
+            repo_model = root / ".reviewmap" / "model"
+            if model_dir is None and (repo_model / "model.txt").is_file():
+                model_dir = repo_model
+        else:
+            frame, commit_frame = _load_frames(dataset_file)
+            for name in frame["repo"].unique():
+                if (data_dir / "repos" / name).is_dir():
+                    repo_dirs[name] = data_dir / "repos" / name
+        folder = model_dir or DEFAULT_MODEL_DIR
+        source = "repo" if model_dir else "default"
+        model = ScoringModel.load(folder_reader(folder), source, str(model_dir or "shipped"))
+        if model_dir is None:
+            model.where = "the shipped default model (trained on requests, flask, click)"
+        notes_text = None
+        if notes is not None:
+            try:
+                notes_text = notes.read_text(encoding="utf-8")
+            except OSError as exc:
+                raise ReviewMapError(f"Could not read {notes}: {exc.strerror or exc}") from None
+        budget = ReadingBudget()
+        result = bt.run_backtest(frame, commit_frame, model, budget)
+        if not result.commits:
+            raise ReviewMapError(
+                "Not enough history to hold out a test period.",
+                hint="The repo needs a few hundred commits spanning a year or more.",
+            )
+        bt.add_fix_subjects(result, repo_dirs)
+        report.parent.mkdir(parents=True, exist_ok=True)
+        _write(report, bt.render_report(result, budget, notes_text))
+
+        table = Table(show_edge=False, header_style="bold")
+        for col in ("Method", "Later-fixed read", "Lines read"):
+            table.add_column(col, justify="left" if col == "Method" else "right")
+        for name in bt.METHODS:
+            t = result.totals[name]
+            table.add_row(
+                escape(name),
+                f"{bt._pct(t.caught, result.later_fixed)}",
+                f"{bt._pct(t.lines_read, result.lines)}",
+            )
+        console.print(
+            f"Replayed {result.commits} commits ({result.later_fixed} later-fixed functions)"
+        )
+        console.print(table)
+        console.print(f"Wrote {escape(str(report))}")
 
 
 @app.command("action")

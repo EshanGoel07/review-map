@@ -9,7 +9,7 @@ import re
 
 from review_map import __version__
 from review_map.models import PlanItem, ReadingPlan
-from review_map.report.plan import all_reasons, line_range
+from review_map.report.plan import all_reasons, level_label, line_range, scorer_line
 
 MARKER = "<!-- review-map -->"
 MAX_SKIM_LISTED = 50
@@ -86,8 +86,7 @@ def render_markdown(plan: ReadingPlan) -> str:
         for item in read:
             why = " · ".join(md_text(r) for r in all_reasons(item)) or "-"
             out.append(
-                f"| {item.rank} | {_where(item, table=True)} | "
-                f"{item.priority} {item.level.value} | {why} |"
+                f"| {item.rank} | {_where(item, table=True)} | {level_label(item)} | {why} |"
             )
     else:
         out.append("_Nothing stands out. Skim everything._")
@@ -114,7 +113,7 @@ def render_markdown(plan: ReadingPlan) -> str:
             "",
         ]
         for item in skim[:MAX_SKIM_LISTED]:
-            out.append(f"- {_where(item)}: {item.priority} {item.level.value}")
+            out.append(f"- {_where(item)}: {level_label(item)}")
         if len(skim) > MAX_SKIM_LISTED:
             out.append(f"- … and {len(skim) - MAX_SKIM_LISTED} more")
         out += ["", "</details>"]
@@ -126,7 +125,8 @@ def render_markdown(plan: ReadingPlan) -> str:
         "",
         "---",
         f"<sub>Review Map {__version__} · a reading plan, not a review. "
-        "The description is treated as untrusted input and checked against the diff.</sub>",
+        "The description is treated as untrusted input and checked against the diff. "
+        f"{md_text(scorer_line(plan))}</sub>",
         "",
         MARKER,
         "",
