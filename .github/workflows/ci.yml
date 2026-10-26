@@ -38,7 +38,7 @@ jobs:
           uv run ruff check .
           uv run ruff format --check .
 
-      - name: Tests (no network: LLM and GitHub are mocked)
+      - name: "Tests (no network: LLM and GitHub are mocked)"
         run: uv run pytest -q
 
       - name: Demo smoke test
