@@ -1145,6 +1145,18 @@ and `tests/snapshots/*`, `reports/{backtest.md,backtest-notes.md,DECISIONS.md}`,
     scope).
   - `doctor` → Ready, exit 0. `--format html` works, and so does `setup --non-interactive`.
 
+**CI fixes after the first push**
+- The first run failed in 0 s: a step name with an unquoted colon made the workflow
+  invalid YAML. It was fixed by quoting the name (commit `4cb50a9`).
+- The second run had 2 failures on every Python version. rich wraps at the terminal
+  width: 80 in CI, which has no terminal, but wider locally. A long temp path then split
+  `config: .reviewmap.yml` and `is not gitignored` across lines. Locally at 80 columns,
+  two *other* tests failed, because macOS temp paths are longer.
+- Fix: `tests/conftest.py` pins `COLUMNS=250` when it loads. That's before the CLI creates
+  its consoles, because rich fixes a console's width when it's created. Tests now pass
+  with COLUMNS unset, 40, 80 and 120 (724 each).
+- Lesson: test output must not depend on the developer's terminal.
+
 **Known limitations**
 - Not on PyPI yet: install from GitHub or a clone.
 - Screenshots in the README are placeholders until they're taken.

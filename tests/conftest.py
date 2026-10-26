@@ -1,5 +1,6 @@
 """Shared test helpers: isolated git config and a tiny repo builder."""
 
+import os
 import socket
 import subprocess
 from pathlib import Path
@@ -23,6 +24,19 @@ def _isolated_git(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.Temp
         "GIT_COMMITTER_EMAIL": "test@example.com",
     }.items():
         monkeypatch.setenv(var, value)
+
+
+# A fixed, wide terminal for rich. Without it, output wraps at the real terminal's width
+# (80 in CI, which has none), and long temp paths split assertions in two. Set at import,
+# before review_map.cli creates its consoles: rich fixes a console's width from COLUMNS
+# when it's created.
+TERMINAL_COLUMNS = "250"
+os.environ["COLUMNS"] = TERMINAL_COLUMNS
+
+
+@pytest.fixture(autouse=True)
+def _wide_terminal(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("COLUMNS", TERMINAL_COLUMNS)
 
 
 _LLM_ENV_VARS = (
